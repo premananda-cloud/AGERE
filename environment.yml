@@ -1,0 +1,29 @@
+name: rl_env
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - scipy
+  - matplotlib
+  - pyyaml
+  - tqdm
+  - tensorboard
+  - pip:
+      # --- PyTorch (CUDA 12.6 wheels; compatible with driver 595.x / CUDA 13.2) ---
+      - --extra-index-url https://download.pytorch.org/whl/cu126
+      - torch
+      - torchvision
+      - torchaudio
+
+      # --- RL stack ---
+      - gymnasium
+      - stable-baselines3[extra]
+
+      # --- Hugging Face (upload trained model) ---
+      - huggingface_hub
+      - safetensors
+
+      # --- Optional: only if you're also logging experiments ---
+      - wandb
