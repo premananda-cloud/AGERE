@@ -21,6 +21,9 @@ dependencies:
       - gymnasium
       - stable-baselines3[extra]
 
+      # --- PX4 comms (R&D path) ---
+      - mavsdk
+
       # --- Hugging Face (upload trained model) ---
       - huggingface_hub
       - safetensors
