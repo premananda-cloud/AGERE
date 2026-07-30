@@ -41,8 +41,57 @@ class ActionLimits:
 
 
 @dataclass
+class PyBulletHoverConfig:
+    """Task + sim settings for the active gym-pybullet-drones hover track.
+
+    Mirrors HoverTaskConfig's intent but adapted to what
+    gym_pybullet_drones.envs.HoverAviary actually exposes. This is the
+    config the training script uses right now; HoverTaskConfig (below)
+    is for the parked PX4/MAVSDK path.
+    """
+
+    # Sim rates. pyb_freq is PyBullet's physics step rate; ctrl_freq is how
+    # often the RL agent gets a step (must evenly divide pyb_freq).
+    pyb_freq: int = 240
+    ctrl_freq: int = 30
+
+    gui: bool = False   # set True locally to watch training; False for
+                         # headless/server runs
+
+    # Action/observation type strings, matching gym_pybullet_drones.utils.enums.
+    # "vel"  -> velocity direction+magnitude, PID-controlled internally,
+    #           no yaw-rate control (framework limitation, see README).
+    # "kin"  -> 12-dim kinematic observation (pos, rpy, vel, ang vel).
+    action_type: str = "vel"
+    observation_type: str = "kin"
+
+    target_position: tuple = (0.0, 0.0, 1.0)   # meters, world frame
+    episode_len_sec: float = 8.0
+
+    # Reset randomization around target_position — same rationale as the
+    # PX4 config: fixed start teaches "memorize one trajectory", randomized
+    # start teaches "stabilize from anywhere nearby".
+    reset_position_jitter: float = 0.3
+    reset_yaw_jitter_deg: float = 15.0
+
+    # Truncation bounds (episode ends as failure if exceeded)
+    max_xy_distance: float = 1.5     # meters from origin, x or y
+    max_altitude: float = 2.0        # meters
+    max_tilt_rad: float = 0.4        # roll or pitch, radians (~23 degrees)
+
+    # Reward shaping weights (used if you override HoverAviary's default
+    # reward — see src/environments/pybullet/hover_env.py)
+    position_error_weight: float = 1.0
+    velocity_penalty_weight: float = 0.05
+    action_smoothness_weight: float = 0.01
+    survival_bonus: float = 0.01
+
+
+@dataclass
 class HoverTaskConfig:
-    """Episode / task definition for hover-and-stabilize."""
+    """PARKED (PX4/MAVSDK path). Episode / task definition for
+    hover-and-stabilize against PX4 SITL. Not used by the active
+    training script — see PyBulletHoverConfig above."""
 
     # Target is expressed relative to the takeoff point, in local NED-ish
     # (north, east, down-negative-up) meters.
@@ -86,7 +135,11 @@ class PPOConfig:
 
 @dataclass
 class ProjectConfig:
+    # Active track
+    pybullet_task: PyBulletHoverConfig = field(default_factory=PyBulletHoverConfig)
+    ppo: PPOConfig = field(default_factory=PPOConfig)
+
+    # Parked (PX4/MAVSDK transplant phase)
     control: ControlConfig = field(default_factory=ControlConfig)
     action_limits: ActionLimits = field(default_factory=ActionLimits)
     task: HoverTaskConfig = field(default_factory=HoverTaskConfig)
-    ppo: PPOConfig = field(default_factory=PPOConfig)

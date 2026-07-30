@@ -21,7 +21,13 @@ dependencies:
       - gymnasium
       - stable-baselines3[extra]
 
-      # --- PX4 comms (R&D path) ---
+      # --- Active track: gym-pybullet-drones (physics sim, no PX4/network) ---
+      # pybullet itself compiles from source on install — needs a C compiler.
+      # On Ubuntu: `sudo apt install build-essential` before creating this env
+      # if pip install fails on the pybullet wheel build.
+      - git+https://github.com/learnsyslab/gym-pybullet-drones.git
+
+      # --- PARKED: PX4/MAVSDK comms, for the later SITL transplant phase ---
       - mavsdk
 
       # --- Hugging Face (upload trained model) ---
