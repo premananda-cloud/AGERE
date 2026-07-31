@@ -89,5 +89,25 @@ class DroneSim:
             angular_velocity=state[13:16],
         )
 
+    def draw_target_marker(self, position: np.ndarray):
+        """Draw a visual-only sphere at `position` (GUI mode only — no
+        physical effect on the sim). Purely for presentations/demos so a
+        viewer can see what the drone is trying to hold station at, since
+        gym-pybullet-drones' GUI doesn't show the target by default."""
+        import pybullet as p
+
+        if not self.sim_config.gui:
+            return
+        visual_shape = p.createVisualShape(
+            p.GEOM_SPHERE, radius=0.05, rgbaColor=[0.2, 0.9, 0.2, 0.5],
+            physicsClientId=self._aviary.CLIENT,
+        )
+        p.createMultiBody(
+            baseMass=0,
+            baseVisualShapeIndex=visual_shape,
+            basePosition=position,
+            physicsClientId=self._aviary.CLIENT,
+        )
+
     def close(self):
         self._aviary.close()

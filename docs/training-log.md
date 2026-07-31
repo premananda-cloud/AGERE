@@ -72,3 +72,37 @@ defaults (`PyBulletHoverConfig`, `PPOConfig`). Not yet executed; `pip
 install -e .` for `gym-pybullet-drones` was not completed in the sandbox
 this was built in. This entry exists as a placeholder for the first real
 run — fill in the template above once it's actually run.
+
+### Run 2026-07-31-0
+
+**Git commit / project state:** post-cleanup, gym_wrapper.py info-dict update
+(truncation_reason / is_crash / position_error_norm added for eval)
+
+**Environment config** (`HoverTaskConfig`, assumed defaults — update if changed)
+- `target_position`: (0.0, 0.0, 1.0)
+- `episode_len_sec`: 8.0
+- `reset_position_jitter` / `reset_yaw_jitter_deg`: 0.3 / 15.0
+- `max_xy_distance` / `max_altitude` / `max_tilt_rad`: 1.5 / 2.0 / 0.4
+- Reward weights: position=1.0, velocity=0.05, smoothness=0.01, survival=0.01
+
+**Model config** (`PPOConfig`, assumed defaults)
+- `learning_rate`: 3e-4, `n_steps`/`batch_size`/`n_epochs`: 2048/64/10
+- `gamma`/`gae_lambda`/`clip_range`/`ent_coef`: 0.99/0.95/0.2/0.01
+- `net_arch`: {pi:[64,64], vf:[64,64]}, `total_timesteps`: 200,000
+
+**Results** (via `python -m src.training.evaluate`, 20 episodes, deterministic)
+- Mean final position error: 0.088 m
+- Crash rate: 0%
+- Mean episode reward: -29.0
+- Episode-level variance: mostly 0.02–0.11 m, but 2/20 episodes (9, 18) reached
+  0.24–0.29 m — a real tail, not just noise around a tight mean
+
+**Verdict**
+- [x] New baseline — keep this config
+- Stage 2 (usable/viable) reached per `hover-model-plan.md`
+
+**Notes / what to try next:**
+- Set `device="cpu"` in `ppo_policy.py` — SB3 warns MLP-PPO is inefficient on GPU
+- Consider Stage 3 push: same eval across 2 more random seeds, tighter 0.1 m bar,
+  investigate what's different about episodes 9/18 (worse start jitter draw? or
+  a policy weak spot worth more training time on?)
