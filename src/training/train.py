@@ -1,7 +1,9 @@
 """
-Entry point for training the hover/stabilize policy — active track,
-running against gym-pybullet-drones (in-process PyBullet physics, no
-PX4/MAVSDK/network dependency at all).
+Entry point for training the hover/stabilize policy.
+
+AGERE is PyBullet + Gymnasium only — no PX4, no network dependency. See
+docs/code-structure.md for how environments/, actions/, and training/
+divide responsibilities.
 
 Usage:
     python -m src.training.train
@@ -12,7 +14,7 @@ Usage:
 import argparse
 
 from src.config import ProjectConfig
-from src.environments.pybullet.hover_env import ConfigurableHoverAviary
+from src.training.gym_wrapper import HoverGymEnv
 from src.policies.ppo_policy import build_ppo
 
 
@@ -24,11 +26,11 @@ def main():
 
     config = ProjectConfig()
     if args.gui:
-        config.pybullet_task.gui = True
+        config.sim.gui = True
     if args.timesteps:
         config.ppo.total_timesteps = args.timesteps
 
-    env = ConfigurableHoverAviary(config.pybullet_task)
+    env = HoverGymEnv(config)
 
     # Note: build_ppo() wraps env in Monitor internally — don't double-wrap here.
     model = build_ppo(env, config.ppo, tensorboard_log="./tb_logs/hover")
