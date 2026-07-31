@@ -67,17 +67,26 @@ class HoverGymEnv(gym.Env):
             + self.task.survival_bonus
         )
 
-    def _is_truncated(self, obs: np.ndarray, state) -> bool:
+    def _truncation_reason(self, obs: np.ndarray, state) -> str | None:
+        """Returns why an episode ended, or None if it's still going.
+
+        Distinguishing "crash" (out_of_bounds/tilt) from "timeout" matters
+        for evaluation — see docs/hover-model-plan.md Stage 2, which
+        requires <10% crash rate specifically, not just "episode ended."
+        """
         x, y = state.position[0], state.position[1]
         roll, pitch = state.orientation_rpy[0], state.orientation_rpy[1]
-        out_of_bounds = (
+        if (
             abs(x) > self.task.max_xy_distance
             or abs(y) > self.task.max_xy_distance
             or state.position[2] > self.task.max_altitude
-        )
-        too_tilted = abs(roll) > self.task.max_tilt_rad or abs(pitch) > self.task.max_tilt_rad
-        timed_out = self._step_count >= self._max_steps
-        return bool(out_of_bounds or too_tilted or timed_out)
+        ):
+            return "out_of_bounds"
+        if abs(roll) > self.task.max_tilt_rad or abs(pitch) > self.task.max_tilt_rad:
+            return "tilt"
+        if self._step_count >= self._max_steps:
+            return "timeout"
+        return None
 
     # ------------------------------------------------------------------
     def reset(self, *, seed=None, options=None):
@@ -109,12 +118,19 @@ class HoverGymEnv(gym.Env):
         reward = self._compute_reward(obs, action)
 
         self._step_count += 1
-        truncated = self._is_truncated(obs, state)
+        reason = self._truncation_reason(obs, state)
+        truncated = reason is not None
         terminated = False  # this task has no early-success condition; it
         # ends via truncation (out of bounds / tilt / timeout) only
 
+        info = {}
+        if truncated:
+            info["truncation_reason"] = reason
+            info["is_crash"] = reason in ("out_of_bounds", "tilt")
+        info["position_error_norm"] = float(np.linalg.norm(obs[0:3]))
+
         self._prev_action = np.asarray(action, dtype=np.float32)
-        return obs, reward, terminated, truncated, {}
+        return obs, reward, terminated, truncated, info
 
     def close(self):
         self.sim.close()

@@ -29,5 +29,6 @@ def build_ppo(env, ppo_config: PPOConfig, tensorboard_log: str | None = None) ->
         policy_kwargs={"net_arch": ppo_config.net_arch},
         tensorboard_log=tensorboard_log,
         verbose=1,
+        device = 'cpu'
     )
     return model
