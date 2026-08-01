@@ -1,191 +1,218 @@
-# AGERE — Project Status (handoff doc)
+# AGERE Project — Status / Context Handoff
 
-Single-file context dump for picking this project up in a new chat/session.
-Read this first; deeper detail lives in the files referenced throughout.
+**Purpose of this file:** give a new LLM chat (or another person) full
+context on this project in one read, without needing the prior
+conversation history. If you're an LLM reading this cold: this is a
+real, ongoing project with real training runs already completed — treat
+stated results as ground truth, not as something to re-derive from
+scratch.
 
 ## What this project is
 
-RL training for a drone hover/stabilization task, part of a larger project
-called "Backseat Driver" (see `docs/architecture/Architecture.md` for the
-full intended system — PX4 flight stack + a supervisory RL/AI layer).
+Reinforcement learning for a multirotor drone, part of a larger project
+called **Agere** / **Backseat Driver**. Currently working on the first
+task in a planned sequence: **hover/stabilize** — hold station at a fixed
+target point, starting from a randomized nearby position.
 
-**Two separate repos, one-directional relationship:**
-- **`AGERE`** (this repo) — model building only. **PyBullet + Gymnasium +
-  stable-baselines3. No PX4, no MAVSDK, no network dependency at all.**
-  This is where the RL policy gets trained and iterated on.
-- **`AGERE_sims`** — a *different* repo. PX4 + Gazebo SITL lives there
-  exclusively. `AGERE` ships a trained model to `AGERE_sims` for plug-and-
-  test; `AGERE_sims`'s integration problems do not feed back into `AGERE`'s
-  development. This split was deliberate — earlier attempts to train
-  directly against PX4/Gazebo/MAVSDK burned significant time on networking
-  issues (WSL2 loopback ambiguity, MAVLink broadcast flags, GPU rendering
-  hacks) instead of on the actual RL model. Full story in the 2026-07-23
-  session notes (PX4 pain — shared as context earlier, may or may not be
-  committed under `docs/devlog/` in your actual repo, worth checking) and
-  `docs/devlog/2026_07_29.md` / `2026_07_30.md` (the pivot and repo split
-  decisions, confirmed present).
+Full system architecture (unchanged, still the long-term target) is in
+`docs/architecture/Architecture.md` — PX4 flight stack + ROS 2 / uXRCE-DDS.
+That document describes the eventual deployed system, not what this repo
+currently builds.
 
-**Current priority, explicitly stated by the project owner:** build and
-train the model. PX4/SITL integration is deferred, possibly to be
-outsourced later. Don't let SITL/deployment concerns creep back into this
-repo's scope.
+## The two-repo split (critical context)
 
-## Current task: hover/stabilize
+- **`AGERE`** (this repo) — model building only. **PyBullet + Gymnasium
+  only. No PX4, no MAVSDK, no network dependency, at all.** This is where
+  the RL policy gets trained and iterated on.
+- **`AGERE_sims`** — a separate repo. PX4 + Gazebo SITL lives here
+  exclusively. This is where a trained model eventually gets plugged in
+  and tested against the real flight stack.
 
-Learn a policy that holds a quadrotor at a fixed 3D target point, starting
-from a randomized nearby position, using velocity-setpoint actions.
+**Why:** early sessions tried training directly against PX4 SITL +
+Gazebo + MAVSDK. This turned into extensive networking/infra debugging
+(WSL2 loopback-vs-real-interface ambiguity, MAVLink broadcast flag
+hunting, GPU rendering hacks for Gazebo's GUI) that had nothing to do
+with learning RL or building the model. Decision: fully decouple model
+development from flight-stack integration. `AGERE` ships a trained model
+to `AGERE_sims` for plug-and-test; `AGERE_sims`'s integration problems do
+not block or feed back into `AGERE`'s development. See
+`docs/devlog/2026_07_30.md` for the full reasoning.
 
-Full spec — environment, action space, reward, and **staged definition of
-"done"** (Stage 0 sanity check → Stage 1 learning signal → Stage 2 usable
-baseline → Stage 3 robust hover) — is in `docs/hover-model-plan.md`. Don't
-duplicate that spec here; this doc points to it.
+The old PX4/MAVSDK code that used to live in `AGERE` (parked, then later
+fully removed) is gone from this repo. If it's needed again, it belongs
+in `AGERE_sims`, not here.
 
-**Status as of 2026-07-31: Stage 2 reached.** See "Results so far" below.
+## Simulation framework
 
-## Repo structure (`AGERE/src/`)
+Training runs against
+[`gym-pybullet-drones`](https://github.com/learnsyslab/gym-pybullet-drones)
+— in-process PyBullet physics, no network, no SITL. Specifically built on
+top of their `HoverAviary` class as the physics engine (used via
+composition, not by inheriting its Gym-Env-ness into our own code — see
+code structure below).
 
-Full rationale for this layout is in `docs/code-structure.md`. Short
-version — the dependency direction is: `actions/` and `environments/` know
-nothing about Gymnasium or RL; `training/` is where Gymnasium, reward
-design, and the training loop all live.
+Key facts about this dependency, established by reading its actual source
+(not assumed from memory):
+- `ActionType.VEL` (what this project uses) = direction vector + speed
+  magnitude, PID-controlled internally via `DSLPIDControl`.
+  **No yaw-rate control** — the internal PID always holds whatever yaw
+  the drone currently has. Acceptable for pure position-hold; would need
+  a different action type if yaw stabilization becomes part of the task.
+- `ObservationType.KIN` = 12-dim kinematic state (position, roll/pitch/yaw,
+  linear velocity, angular velocity), read via `_getDroneStateVector()`.
+- `BaseAviary._housekeeping()` reads `INIT_XYZS`/`INIT_RPYS` fresh on every
+  `reset()` call — this is how true per-episode start-position
+  randomization was implemented (mutate those arrays before calling the
+  parent's `reset()`).
+- Installing it (`pip install -e .` or via `git+https://...` in
+  `environment.yml`) compiles `pybullet` from source — needs a C compiler.
+
+## Code structure (`src/`)
+
+Full rationale in `docs/code-structure.md`. The organizing principle:
+**simulation** (physics facts, doesn't know about RL) is separate from
+**training** (RL design choices: reward, spaces, episode logic).
 
 ```
 src/
-  config.py                    All tunable constants:
-                                - SimConfig: pyb_freq, ctrl_freq, gui (physics-only, no RL concepts)
-                                - HoverTaskConfig: target_position, episode_len_sec,
-                                  reset jitter, truncation bounds, reward weights
-                                - PPOConfig: PPO hyperparameters
-                                - ProjectConfig: bundles the three above
-
-  actions/velocity_action.py   Defines what a raw 4-vector action means physically:
-                                direction (3) + speed magnitude (1), matching
-                                gym-pybullet-drones' own VEL action convention.
-                                No gymnasium import. VelocityCommand dataclass +
-                                normalize_action() function.
-
-  environments/drone_sim.py    DroneSim — pure PyBullet simulation wrapper around
-                                gym_pybullet_drones.envs.HoverAviary. No reward, no
-                                episode/termination logic, no Gymnasium spaces exposed
-                                at this layer (NOTE: HoverAviary itself IS built as a
-                                gymnasium.Env internally — that's a property of the
-                                third-party library we didn't remove, just didn't
-                                re-expose). Methods: reset_episode(pos, yaw),
-                                apply_action(VelocityCommand), get_state(),
-                                draw_target_marker(pos) [GUI-only, for demos], close().
-
-  training/gym_wrapper.py      HoverGymEnv(gymnasium.Env) — THE Gymnasium environment.
-                                Owns action_space/observation_space, reward function,
-                                termination/truncation logic. Wraps DroneSim.
-                                step() returns an info dict with: truncation_reason
-                                ("out_of_bounds"/"tilt"/"timeout"/absent),
-                                is_crash (bool, timeout doesn't count as a crash),
-                                position_error_norm (float, every step).
-
-  training/train.py            Entry point. `python -m src.training.train [--gui]
-                                [--timesteps N]`. Saves hover_stabilize_ppo.zip.
-
-  training/evaluate.py         Runs N deterministic episodes against a saved model,
-                                reports mean position error + crash rate, checks
-                                against Stage 2 thresholds (0.3m, <10% crash) from
-                                hover-model-plan.md. `python -m src.training.evaluate
-                                [--model path] [--episodes N] [--gui]`.
-
-  training/demo.py             Live PyBullet GUI demo for showing to other people
-                                (not for evaluation). Loops episodes continuously,
-                                real-time paced via gym_pybullet_drones.utils.utils.sync,
-                                draws a target marker. `python -m src.training.demo
-                                [--model path] [--episodes N]`.
-
-  policies/ppo_policy.py       build_ppo(env, ppo_config) — only file that imports
-                                the PPO class specifically. Track-agnostic otherwise.
-
-  models/networks.py           Placeholder for custom feature extractors. Empty by
-                                design — current 9-dim observation doesn't need one.
-                                Extension point for later (e.g. vision/LiDAR obs).
+├── config.py                    All tunable constants:
+│                                   SimConfig       — pyb_freq, ctrl_freq, gui
+│                                   HoverTaskConfig — target position, episode
+│                                                     length, reset jitter,
+│                                                     termination bounds,
+│                                                     reward weights
+│                                   PPOConfig       — PPO hyperparameters
+│
+├── actions/velocity_action.py   Defines what a raw 4-vector action MEANS
+│                                 physically (direction + speed). No
+│                                 gymnasium import, no PX4.
+│
+├── environments/drone_sim.py    DroneSim: pure PyBullet wrapper around
+│                                 gym-pybullet-drones' HoverAviary. No
+│                                 reward, no episode logic, no Gymnasium
+│                                 spaces exposed at this layer — just
+│                                 reset_episode() / apply_action() /
+│                                 get_state() / draw_target_marker() /
+│                                 close(). NOTE: the underlying HoverAviary
+│                                 class IS itself a gymnasium.Env internally
+│                                 (that's baked into the third-party
+│                                 library) — this wrapper doesn't re-expose
+│                                 that, but it's not a from-scratch physics
+│                                 implementation either. Known, accepted
+│                                 tradeoff, not hidden.
+│
+├── models/networks.py           Placeholder for custom feature extractors.
+│                                 Empty — not needed yet (12-dim obs is
+│                                 small). Extension point for later (e.g.
+│                                 vision/LiDAR input for obstacle avoidance).
+│
+├── policies/ppo_policy.py       build_ppo(env, config) — constructs SB3
+│                                 PPO. Track-agnostic; only file that knows
+│                                 we're using PPO specifically.
+│
+└── training/
+    ├── gym_wrapper.py           HoverGymEnv(gymnasium.Env) — THIS is where
+    │                             Gymnasium lives. Action/observation
+    │                             spaces, reward function, episode
+    │                             termination/truncation logic. Wraps
+    │                             DroneSim. step() returns an info dict
+    │                             with truncation_reason ("out_of_bounds" /
+    │                             "tilt" / "timeout"), is_crash (bool —
+    │                             timeout ≠ crash), and position_error_norm.
+    ├── train.py                 Entry point: python -m src.training.train
+    │                             [--gui] [--timesteps N]
+    ├── evaluate.py               python -m src.training.evaluate
+    │                             [--model path] [--episodes N] [--gui]
+    │                             Runs the saved model deterministically,
+    │                             reports mean final position error + crash
+    │                             rate against Stage 2 criteria (below).
+    └── demo.py                   python -m src.training.demo [--model path]
+                                  [--episodes N]
+                                  Live PyBullet GUI demo for showing to
+                                  other people — loops episodes, paced to
+                                  real time via gym-pybullet-drones' own
+                                  sync() helper, draws a green marker at
+                                  the target position.
 ```
 
-## Docs already written (don't recreate these)
+## Reward function (in `gym_wrapper.py`)
 
-- `docs/code-structure.md` — why the folders are organized this way
-- `docs/hover-model-plan.md` — environment/action/model spec + staged
-  completion criteria (the authoritative "when is this done" reference)
-- `docs/training-log.md` — living log, one entry per training run (copy the
-  template at the top for new entries)
-- `docs/devlog/2026_07_13.md`, `2026_07_21.md`, `2026_07_29.md`,
-  `2026_07_30.md` — dated session records (underscore naming convention —
-  stick to it for new devlogs). A 2026-07-23 session (the PX4 networking
-  troubleshooting day) was referenced earlier in this project's history but
-  wasn't confirmed to be committed as a devlog file — check if it exists.
-- `docs/architecture/Architecture.md` — the original, unchanged, intended
-  end-state system architecture (PX4 + ROS2/uXRCE-DDS)
+```
+reward = -w_pos * ||target_position - position||
+         -w_vel * ||velocity||
+         -w_smooth * ||action_t - action_{t-1}||
+         +survival_bonus
+```
+Default weights: `position_error_weight=1.0`, `velocity_penalty_weight=0.05`,
+`action_smoothness_weight=0.01`, `survival_bonus=0.01`. Custom — not
+`HoverAviary`'s built-in `max(0, 2 - ||pos_error||**4)` reward.
 
-## Environment setup
+## Definition of done (full detail in `docs/hover-model-plan.md`)
 
-Conda env `rl_env`, defined in `environment.yml`. Key points:
-- **`setuptools<82` is pinned.** `setuptools>=82` removed the `pkg_resources`
-  module entirely; `gym_pybullet_drones`'s `BaseAviary.py` still imports it
-  internally, causing `ModuleNotFoundError: No module named 'pkg_resources'`
-  without this pin. Remove the pin only once gym-pybullet-drones drops that
-  dependency upstream.
-- `gym-pybullet-drones` is installed via
-  `git+https://github.com/learnsyslab/gym-pybullet-drones.git` — compiles
-  `pybullet` from source, needs a C compiler (`build-essential` on
-  Debian/Ubuntu).
-- **No `mavsdk`** — removed entirely; PX4 tooling belongs in `AGERE_sims`,
-  not here.
-- PyTorch installed via `cu126` wheel index (CUDA 12.6, compatible with the
-  dev machine's driver 595.x / CUDA 13.2 and RTX 4070 SUPER).
+Staged, not binary:
+- **Stage 0** — pipeline sanity (env installs, training runs without error)
+- **Stage 1** — learning signal present (reward trending, episodes surviving longer)
+- **Stage 2** — usable/viable baseline: mean final position error < 0.3 m,
+  crash rate < 10%, over 20 eval episodes
+- **Stage 3** — robust hover: same criteria hold across 3+ random seeds,
+  position error < 0.1 m, recovers from mid-episode disturbance
+- **Stage 4** — transplant-ready (belongs to `AGERE_sims`, out of scope here)
 
-## Results so far
+## Current status: **Stage 2 reached** (2026-07-31 run)
 
-First full training run (2026-07-31), 200,000 timesteps, default config.
-Evaluated with `evaluate.py`, 20 deterministic episodes:
+Real evaluation results, `python -m src.training.evaluate`, 20 episodes,
+deterministic policy:
+- Mean final position error: **0.088 m** (well under the 0.3 m bar)
+- Crash rate: **0%** (every episode ran the full 240 steps)
+- Mean episode reward: -29.0
+- **Caveat worth carrying forward:** not uniform — 2 of 20 episodes
+  reached 0.24–0.29 m, right up against the Stage 2 ceiling, and
+  correlated with the worst-reward episodes (-55 to -75). This is a real
+  tail in the policy's behavior, not just noise around a tight mean.
+  Relevant to whether Stage 3 (tighter 0.1 m bar, 3+ seeds) will pass
+  without further training or reward tuning.
 
-- **Mean final position error: 0.088 m** (Stage 2 threshold: <0.3 m — PASS)
-- **Crash rate: 0%** (Stage 2 threshold: <10% — PASS)
-- **Mean episode reward: -29.0**
-- **Stage 2 (usable/viable baseline) reached.**
-- Caveat worth carrying forward: not uniform — 2 of 20 episodes had final
-  position error 0.24–0.29 m (right up against the Stage 2 ceiling) with
-  correspondingly worse rewards (-55 to -75). A real tail, not just noise
-  around a tight mean. Stage 3 (tighter 0.1 m bar, held across 3 seeds) is
-  the next thing this tail should be checked against before calling the
-  hover task genuinely solved.
+Full run details logged in `docs/training-log.md` (run `2026-07-31-0`) —
+check there for exact config values used, since defaults in `config.py`
+may have changed since.
 
-Full entry logged in `docs/training-log.md`.
+## Known issues / environment gotchas
 
-## Known issues / open items (flagged, not fixed yet)
+- **`setuptools>=82` breaks `gym-pybullet-drones`.** It imports
+  `pkg_resources` internally (`BaseAviary.py`), which setuptools removed
+  in version 82+. Fix: pin `setuptools<82` in `environment.yml` (already
+  done as of the version referenced in this handoff — verify it's still
+  there).
+- **SB3 warns about running PPO's MlpPolicy on GPU.** This is a real
+  inefficiency, not just noise — MLP-based PPO is typically faster on CPU
+  given the tiny network size and GPU transfer overhead. Consider passing
+  `device="cpu"` in `ppo_policy.py`'s `PPO(...)` call. Not yet done as of
+  this handoff.
+- Runtime verification of new code in this project has generally been done
+  by the project owner locally, not by whichever LLM wrote the code —
+  earlier sessions were built inside a sandboxed environment that couldn't
+  finish compiling `pybullet` (execution time limits), so code was
+  syntax-checked and logic-traced against the actual gym-pybullet-drones
+  source, then handed off for real testing. This has generally gone well,
+  but don't assume newly-written code in this repo has been run
+  end-to-end unless a human confirms it (as happened for `evaluate.py` and
+  is expected for `demo.py`).
 
-1. **PPO on GPU is inefficient for this task.** stable-baselines3 warns
-   about this — `MlpPolicy` (not CNN-based) is usually faster on CPU given
-   the network's small size and GPU transfer overhead. Fix: add
-   `device="cpu"` to the `PPO(...)` constructor call in
-   `src/policies/ppo_policy.py`. **Not yet applied.**
-2. **No yaw-rate control** in the action space — a `gym-pybullet-drones`
-   library limitation (its `VEL` action type holds current yaw always), not
-   something introduced by this project's code. Acceptable for pure
-   position-hold; would need `ActionType.PID` or a custom action handler if
-   yaw stabilization becomes part of the task.
-3. **Reward function is a custom design**, not `HoverAviary`'s built-in
-   quartic reward. Reasonable, but not independently validated beyond the
-   one training run above.
-4. **Total timesteps**: default is 200,000; there's a case for bumping to
-   ~1,000,000 for a more thoroughly trained policy, especially to see if
-   the Stage 2 tail (episodes 9/18 above) tightens up with more training.
-   Not yet done — would need re-running `train.py` with `--timesteps
-   1000000` or updating the default in `config.py`.
+## Suggested next steps (as of this handoff)
 
-## Suggested next steps (pick up here in a new chat)
+1. Set `device="cpu"` in `ppo_policy.py`.
+2. Decide: push for Stage 3 (more seeds, tighter threshold, investigate
+   the position-error tail from episodes 9/18 in the 07-31 run — was it a
+   bad start-jitter draw, or a genuine policy weak spot?), or move on to
+   the next task (waypoint navigation) using this as a working baseline.
+3. `docs/hover-model-plan.md` explicitly recommends not over-polishing
+   Stage 2 before checking whether the current design (obs space, reward
+   shape, PPO config) generalizes to the next task at all.
 
-1. Apply `device="cpu"` fix to `ppo_policy.py`.
-2. Decide: push for Stage 3 (more seeds, 0.1 m bar, investigate the
-   episode 9/18 tail) vs. move on to the next task (waypoint navigation)
-   with this as the baseline. `hover-model-plan.md` has the Stage 3
-   checklist already written.
-3. If continuing to train, consider whether 1,000,000 timesteps is
-   actually justified by the reward curve shape so far (check TensorBoard,
-   `./tb_logs/hover`) rather than assuming more steps automatically means a
-   better policy — the plateau behavior described in earlier devlog
-   entries is worth re-checking against the full curve.
-4. Log whatever's done next in `docs/training-log.md` using its template.
+## Other docs in this repo worth reading, in rough priority order
+
+1. `docs/code-structure.md` — full reasoning for the src/ layout above
+2. `docs/hover-model-plan.md` — full task spec + staged completion criteria
+3. `docs/training-log.md` — living log, one entry per training run
+4. `docs/devlog/2026_07_30.md` — the AGERE/AGERE_sims split decision
+5. `docs/architecture/Architecture.md` — long-term system architecture (PX4/ROS2)
