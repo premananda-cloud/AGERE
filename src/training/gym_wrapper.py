@@ -108,7 +108,14 @@ class HoverGymEnv(gym.Env):
         self._prev_action = np.zeros(ACTION_DIM, dtype=np.float32)
 
         obs = self._obs_from_state(state)
-        return obs, {}
+        # Exposed so callers (evaluate.py's tail diagnostics, in particular)
+        # can correlate final outcome with the randomized start condition,
+        # rather than only ever seeing the post-jitter obs.
+        info = {
+            "start_position": start_position.copy(),
+            "start_yaw_rad": float(start_yaw),
+        }
+        return obs, info
 
     def step(self, action: np.ndarray):
         command = normalize_action(action)

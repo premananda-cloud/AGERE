@@ -13,7 +13,12 @@ from stable_baselines3.common.monitor import Monitor
 from src.config import PPOConfig
 
 
-def build_ppo(env, ppo_config: PPOConfig, tensorboard_log: str | None = None) -> PPO:
+def build_ppo(
+    env,
+    ppo_config: PPOConfig,
+    tensorboard_log: str | None = None,
+    seed: int | None = None,
+) -> PPO:
     monitored_env = Monitor(env)
     model = PPO(
         policy="MlpPolicy",
@@ -29,6 +34,7 @@ def build_ppo(env, ppo_config: PPOConfig, tensorboard_log: str | None = None) ->
         policy_kwargs={"net_arch": ppo_config.net_arch},
         tensorboard_log=tensorboard_log,
         verbose=1,
-        device = 'cpu'
+        device = 'cpu',
+        seed=seed,
     )
     return model

@@ -6,6 +6,10 @@ Runs continuously, looping episodes, at real-time speed so it's watchable.
 Draws a green marker at the target position so viewers can see what the
 drone is trying to hold station at.
 
+On Intel integrated graphics with no dedicated GPU, this may fail to open
+the GUI window or render a black screen — see demo_intel.py, which is
+identical except for Mesa/OpenGL compatibility flags.
+
 Usage:
     python -m src.training.demo
     python -m src.training.demo --model hover_stabilize_ppo.zip
