@@ -89,6 +89,68 @@ class DroneSim:
             angular_velocity=state[13:16],
         )
 
+    def apply_velocity_kick(self, delta_velocity: np.ndarray) -> None:
+        """Instantaneously add `delta_velocity` (m/s, world frame) to the
+        drone's current linear velocity — for simulating a mid-episode
+        disturbance (Stage 3 criterion 3, docs/hover-model-plan.md).
+
+        Uses PyBullet's resetBaseVelocity, which is a direct kinematic
+        override rather than something routed through the physics solver
+        (confirmed against PyBullet's own docs/forum discussion) —
+        appropriate here since the drone isn't in contact with anything,
+        and it gives a clean, well-defined kick that isn't sensitive to
+        internal physics-substep timing the way apply_impulse_force()
+        below is (see that method's docstring). Prefer this method unless
+        you specifically want the literal applyExternalForce mechanism the
+        plan doc names as an example.
+
+        Only linearVelocity is passed to resetBaseVelocity — confirmed
+        each of linearVelocity/angularVelocity is an independently
+        optional parameter, not "pass both or the other resets to zero,"
+        so this leaves current angular velocity (yaw/tilt rate) untouched.
+        """
+        import pybullet as p
+
+        current = self.get_state().velocity
+        new_velocity = np.asarray(current, dtype=np.float64) + np.asarray(delta_velocity, dtype=np.float64)
+        p.resetBaseVelocity(
+            self._aviary.DRONE_IDS[0],
+            linearVelocity=new_velocity.tolist(),
+            physicsClientId=self._aviary.CLIENT,
+        )
+
+    def apply_impulse_force(self, force: np.ndarray) -> None:
+        """Apply a one-shot external force (Newtons, world frame) at the
+        drone's current position, via PyBullet's applyExternalForce — the
+        mechanism docs/hover-model-plan.md names directly as an example
+        for Stage 3 criterion 3.
+
+        Real caveat, confirmed against PyBullet's own docs: "After each
+        simulation step, the external forces are cleared to zero."
+        HoverAviary.step() (called from apply_action() below) runs several
+        physics substeps internally per control step (pyb_freq/ctrl_freq
+        of them) that this class has no hook into — so a single call here
+        only actually acts on the FIRST physics substep of the next
+        apply_action() call, not the whole control step. That's a
+        legitimate model of a literal impulse (a brief force) rather than
+        a sustained push, but the "brief" part is a consequence of this
+        constraint, not a tunable choice. For a kick whose magnitude
+        doesn't depend on substep timing, prefer apply_velocity_kick()
+        above; this method exists because the plan doc names
+        applyExternalForce specifically.
+        """
+        import pybullet as p
+
+        state = self.get_state()
+        p.applyExternalForce(
+            objectUniqueId=self._aviary.DRONE_IDS[0],
+            linkIndex=-1,
+            forceObj=np.asarray(force, dtype=np.float64).tolist(),
+            posObj=state.position.tolist(),
+            flags=p.WORLD_FRAME,
+            physicsClientId=self._aviary.CLIENT,
+        )
+
     def draw_target_marker(self, position: np.ndarray):
         """Draw a visual-only sphere at `position` (GUI mode only — no
         physical effect on the sim). Purely for presentations/demos so a
