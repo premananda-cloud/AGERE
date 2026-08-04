@@ -92,7 +92,7 @@ def main():
         config.sim.gui = True
 
     env = HoverGymEnv(config)
-    model = PPO.load(model_path)
+    model = PPO.load(model_path, device="cpu")
 
     position_errors = []
     crashes = []

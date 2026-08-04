@@ -41,7 +41,7 @@ def main():
     config.sim.gui = True  # demo always shows the window, no --gui flag needed
 
     env = HoverGymEnv(config)
-    model = PPO.load(model_path)
+    model = PPO.load(model_path, device="cpu")
 
     timestep = 1.0 / config.sim.ctrl_freq
     episode = 0

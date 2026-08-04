@@ -232,3 +232,55 @@ further code changes between these two runs).
   reviewed for where to hook `applyExternalForce`, plus a concrete numeric
   pass/fail threshold for "recovers within a few seconds" (currently
   qualitative in `hover-model-plan.md`).
+
+### Run 2026-08-02-0
+
+**Git commit / project state:** repo reorganized since the last two
+entries — `model/`/`tb_logs/` moved out of git (pushed to Hugging Face
+instead, both `.gitignore`d), `src/paths.py` added as the single save/load
+path source of truth for all four training entry points. No changes to
+env/reward/PPO config itself.
+
+**Environment / model config:** same as `2026-08-01-0`/`2026-08-01-1`
+(unchanged this session) — `--seed 1`, `--timesteps 500000`, same
+`HoverTaskConfig`/`PPOConfig` defaults.
+
+**Command:** `python -m src.training.train --seed 1 --timesteps 500000`
+(training stdout not captured this session — only the eval run below was
+shared; config assumed unchanged from the two prior runs since nothing
+in `config.py` was touched between sessions)
+
+**Results (eval, `python -m src.training.evaluate --model model/hover_stabilize/hover_stabilize_ppo_seed1.zip --seed 42`)**
+- Mean final position error: **0.015 m** — best result of any run to date
+- Crash rate: **0.0%** (0/20)
+- Tail episodes (>0.2 m): 0/20
+- Mean episode reward: -9.3
+
+**Verdict**
+- [x] New baseline — completes the Stage 3 seed set
+- All three seeds now individually clear both Stage 3 bars:
+
+  | Seed | Mean pos error | Crash rate |
+  |---|---|---|
+  | 0 | 0.025 m | 5% (1/20, tilt, ep 14) |
+  | 1 | 0.015 m | 0% |
+  | 2 | 0.018 m | 0% |
+
+  Stage 3 criteria 1 ("Stage 2 holds across 3+ seeds") and 2 ("mean
+  position error < 0.1 m") are met — every seed clears both bars
+  individually, no borderline cases, so the earlier open question about
+  whether these are compound or separate per-seed checks turned out not
+  to matter. The seed-0 tilt crash didn't recur in either seed 1 or 2 —
+  2/3 seeds fully clean is reasonable evidence it was a rare fluke rather
+  than a systemic tendency, though "reasonable evidence" with n=3 seeds
+  and 20 eval episodes each isn't the same as ruling it out entirely.
+
+**Notes / what to try next:**
+- Stage 3 criterion 3 (disturbance recovery) is the only remaining piece.
+  Needs `environments/drone_sim.py` reviewed for where to hook PyBullet's
+  `applyExternalForce`, and a concrete numeric threshold for "recovers
+  within a few seconds" — still qualitative in `hover-model-plan.md`.
+- `evaluate.py`/`demo.py`/`demo_intel.py` now load models with
+  `device="cpu"` explicitly (previously only training specified this,
+  causing a spurious SB3 GPU warning at eval/demo time even though the
+  model was trained CPU-only).

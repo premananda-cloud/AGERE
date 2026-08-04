@@ -158,44 +158,37 @@ Staged, not binary:
   position error < 0.1 m, recovers from mid-episode disturbance
 - **Stage 4** — transplant-ready (belongs to `AGERE_sims`, out of scope here)
 
-## Current status: **Stage 3 in progress** (as of 2026-08-01 session)
+## Current status: **Stage 3 criteria 1 & 2 met; criterion 3 not started** (as of 2026-08-02)
 
-Stage 2 (usable/viable baseline) was reached 2026-07-31 — see prior
-entry below, superseded by the results in this section.
-
-**This session's finding, in order:** the 07-31 model's position-error
-tail (2/20 episodes at 0.24–0.29 m) was diagnosed and ruled out as a
-start-condition effect (start-position jitter and yaw jitter both showed
-weak/no correlation with final error; per-step trajectory tracking showed
-all tail episodes as "never converged" within the 240-step episode, not
-"converged then drifted"). Retraining the same config for 500,000
-timesteps (vs. the original 200,000) resolved it — confirms undertraining,
-not reward shape, was the cause.
-
-Two of the required 3+ seeds for Stage 3 are done:
+Stage 2 (usable/viable baseline) was reached 2026-07-31. This session
+diagnosed and resolved the 07-31 model's position-error tail (undertraining,
+not reward shape — resolved by training 500,000 timesteps instead of
+200,000) and completed the required 3-seed set:
 
 | Seed | Mean pos error | Crash rate | Notes |
 |---|---|---|---|
 | 0 | 0.025 m | 5% (1/20) | tilt crash, episode 14 — start condition unremarkable |
-| 2 | 0.018 m | 0% (0/20) | clean, best result to date |
+| 1 | 0.015 m | 0% | clean, best result to date |
+| 2 | 0.018 m | 0% | clean |
 
-Both comfortably clear Stage 3's 0.1 m mean-error bar and the 10%
-crash-rate bar. **Seed 1 not yet run** — needed before the multi-seed
-criterion can be called met. The seed-0 tilt crash is the open question:
-one data point can't yet distinguish a rare fluke from a real (if
-low-rate) tendency of the more-tightly-converged 500k-timestep policies
-to occasionally exceed the tilt limit near end-of-episode-length
-corrections. Seed 1 plus, ideally, more than one eval run per seed would
-sharpen this.
+**All three seeds individually clear both the 0.1 m mean-error bar and
+the 10% crash-rate bar.** Stage 3 criteria 1 ("Stage 2 holds across 3+
+seeds") and 2 ("mean position error < 0.1 m") are met. The seed-0 tilt
+crash didn't recur in seeds 1 or 2 — reasonable evidence it was a rare
+fluke rather than a systemic issue, though n=3 seeds × 20 episodes isn't
+large enough to rule it out with high confidence.
 
-Stage 3's third criterion — recovery from a mid-episode external
-disturbance — has not been started. No code exists yet to inject a
-disturbance mid-episode, and the plan doc's "recovers... within a few
-seconds" isn't yet a concrete, checkable number.
+**Not started: Stage 3 criterion 3** — recovery from a mid-episode
+external disturbance. No code exists yet to inject a disturbance
+mid-episode, and "recovers... within a few seconds" isn't yet a concrete,
+checkable number.
 
-Full run details in `docs/training-log.md` (runs `2026-08-01-0` and
-`2026-08-01-1`) and today's session record `docs/01-08-2026.md`. See also
-`docs/stage3-push-plan.md` for the working plan this push is following.
+Full run details in `docs/training-log.md` (runs `2026-08-01-0`,
+`2026-08-01-1`, `2026-08-02-0`) and `docs/01-08-2026.md`. Repo layout for
+weights/logs changed this session too — see `docs/conventions.md`:
+`model/` and `tb_logs/` are now `.gitignore`d and pushed to Hugging Face
+instead, with `src/paths.py` as the single source of truth for save/load
+paths across all training entry points.
 
 ### Prior status: Stage 2 reached (2026-07-31 run)
 
@@ -238,22 +231,20 @@ may have changed since.
   (including two follow-up bugfixes to `evaluate.py`'s tail/crash
   reporting) once real results came back.
 
-## Suggested next steps (as of 2026-08-01 session)
+## Suggested next steps (as of 2026-08-02 session)
 
-1. Run seed 1 (`python -m src.training.train --seed 1 --timesteps 500000`,
-   then evaluate with `--seed 42` for comparability with seeds 0 and 2).
-2. Once all three seeds are in, assess whether the seed-0 tilt crash
-   recurs — decides whether it's a one-off or worth investigating
-   further (candidate: `action_smoothness_weight` may be under-penalizing
-   sharp corrections from a policy with reduced exploration noise).
-3. Build the disturbance-recovery eval mode (Stage 3 criterion 3) — needs
-   `environments/drone_sim.py` reviewed for where to hook PyBullet's
-   `applyExternalForce`, and a concrete numeric threshold for "recovers
-   within a few seconds."
-4. Resolve the open question of whether Stage 3's "holds across 3+ seeds"
-   and "mean position error < 0.1 m" are one compound per-seed condition
-   or two separate checks — affects how strictly a borderline seed result
-   should be judged.
+1. Build the disturbance-recovery eval mode (Stage 3 criterion 3, the
+   only remaining piece) — needs `environments/drone_sim.py` reviewed for
+   where to hook PyBullet's `applyExternalForce`, and a concrete numeric
+   threshold for "recovers within a few seconds."
+2. If a firmer answer on the seed-0 tilt crash is wanted before calling
+   Stage 3 fully closed: more than one eval run per seed, or a 4th/5th
+   training seed, would sharpen the "fluke vs. rare tendency" read beyond
+   what 3 seeds × 20 episodes can support.
+3. Once criterion 3 is built and passes, Stage 3 is complete — decide
+   whether to invest further in this task or move to the next one
+   (waypoint navigation), per `hover-model-plan.md`'s own note not to
+   over-polish one stage before checking design generalization.
 
 ## Other docs in this repo worth reading, in rough priority order
 
