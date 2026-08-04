@@ -11,8 +11,12 @@ with randomized starts, and reports:
 
 Usage:
     python -m src.training.evaluate
-    python -m src.training.evaluate --model hover_stabilize_ppo.zip --episodes 20
+    python -m src.training.evaluate --model model/hover_stabilize/hover_stabilize_ppo_seed0.zip
+    python -m src.training.evaluate --episodes 20
     python -m src.training.evaluate --gui   # watch the eval episodes
+
+Defaults to model/hover_stabilize/hover_stabilize_ppo.zip if --model isn't
+given (see src/paths.py).
 """
 
 import argparse
@@ -21,6 +25,7 @@ import numpy as np
 from stable_baselines3 import PPO
 
 from src.config import ProjectConfig
+from src.paths import hover_stabilize_model_path
 from src.training.gym_wrapper import HoverGymEnv
 
 # Stage 2 criteria, per docs/hover-model-plan.md — keep these two files in
@@ -60,7 +65,13 @@ def run_episode(env: HoverGymEnv, model: PPO, seed=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="hover_stabilize_ppo.zip")
+    parser.add_argument(
+        "--model", type=str, default=None,
+        help="Path to a model .zip. Defaults to model/hover_stabilize/hover_stabilize_ppo.zip "
+             "(the unseeded default-run save location — see src/paths.py). Pass a full path "
+             "to evaluate a specific seeded checkpoint, e.g. "
+             "model/hover_stabilize/hover_stabilize_ppo_seed0.zip"
+    )
     parser.add_argument("--episodes", type=int, default=20, help="Matches Stage 2's 20-episode spec")
     parser.add_argument("--gui", action="store_true")
     parser.add_argument(
@@ -74,13 +85,14 @@ def main():
              "episodes in the summary (default 0.2 m, below the 0.3 m Stage 2 ceiling)."
     )
     args = parser.parse_args()
+    model_path = args.model or str(hover_stabilize_model_path())
 
     config = ProjectConfig()
     if args.gui:
         config.sim.gui = True
 
     env = HoverGymEnv(config)
-    model = PPO.load(args.model)
+    model = PPO.load(model_path)
 
     position_errors = []
     crashes = []

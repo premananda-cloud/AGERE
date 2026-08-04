@@ -23,20 +23,25 @@ from stable_baselines3 import PPO
 from gym_pybullet_drones.utils.utils import sync
 
 from src.config import ProjectConfig
+from src.paths import hover_stabilize_model_path
 from src.training.gym_wrapper import HoverGymEnv
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="hover_stabilize_ppo.zip")
+    parser.add_argument(
+        "--model", type=str, default=None,
+        help="Defaults to model/hover_stabilize/hover_stabilize_ppo.zip (see src/paths.py)"
+    )
     parser.add_argument("--episodes", type=int, default=None, help="Loop forever if not set")
     args = parser.parse_args()
+    model_path = args.model or str(hover_stabilize_model_path())
 
     config = ProjectConfig()
     config.sim.gui = True  # demo always shows the window, no --gui flag needed
 
     env = HoverGymEnv(config)
-    model = PPO.load(args.model)
+    model = PPO.load(model_path)
 
     timestep = 1.0 / config.sim.ctrl_freq
     episode = 0

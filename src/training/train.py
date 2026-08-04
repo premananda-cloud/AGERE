@@ -9,11 +9,16 @@ Usage:
     python -m src.training.train
     python -m src.training.train --gui               # watch training live
     python -m src.training.train --timesteps 500000  # override config
+    python -m src.training.train --seed 0            # for Stage 3's multi-seed requirement
+
+Saves to model/hover_stabilize/hover_stabilize_ppo[_seed{N}].zip (see
+src/paths.py) — not the working directory.
 """
 
 import argparse
 
 from src.config import ProjectConfig
+from src.paths import hover_stabilize_model_path, HOVER_STABILIZE_TB_LOG_DIR
 from src.training.gym_wrapper import HoverGymEnv
 from src.policies.ppo_policy import build_ppo
 
@@ -39,14 +44,15 @@ def main():
     env = HoverGymEnv(config)
 
     # Note: build_ppo() wraps env in Monitor internally — don't double-wrap here.
-    model = build_ppo(env, config.ppo, tensorboard_log="./tb_logs/hover", seed=args.seed)
+    model = build_ppo(env, config.ppo, tensorboard_log=str(HOVER_STABILIZE_TB_LOG_DIR), seed=args.seed)
     model.learn(total_timesteps=config.ppo.total_timesteps)
 
-    # Seed-suffixed filename so multi-seed training runs (Stage 3) don't
-    # clobber each other's saved model.
-    save_name = f"hover_stabilize_ppo_seed{args.seed}" if args.seed is not None else "hover_stabilize_ppo"
-    model.save(save_name)
-    print(f"\nSaved model to {save_name}.zip")
+    # Standard location: model/hover_stabilize/hover_stabilize_ppo[_seedN].zip
+    # (see src/paths.py) — not the working directory. Multi-seed runs (Stage 3)
+    # don't clobber each other since the seed is baked into the filename.
+    save_path = hover_stabilize_model_path(args.seed)
+    model.save(str(save_path))
+    print(f"\nSaved model to {save_path}")
 
     env.close()
 
