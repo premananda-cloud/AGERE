@@ -19,6 +19,19 @@ things are genuinely different from hover, not just cosmetic:
    landing_hold_time_sec, and the episode TERMINATES (not truncates) as
    a success. This is why `terminated` is no longer hardcoded False here
    the way it is in hover_gym_wrapper.py.
+
+Observation space is intentionally IDENTICAL in shape to HoverGymEnv's (9
+floats: pos_error, velocity, roll/pitch/yaw_error) — an earlier draft of
+this file added a 10th "landing_phase" flag, but that breaks weight
+transfer from a hover checkpoint (SB3's PPO.load() rebuilds the policy's
+input layer from the saved obs shape; a 9-vs-10 mismatch fails to load).
+Keeping the shapes identical means waypoint_train.py's --init-from can
+warm-start directly from a trained hover_stabilize checkpoint — the
+policy already knows "minimize position error, don't move too fast,"
+which is most of what waypoint-following needs anyway. The landing phase
+is tracked internally (self._in_landing) and used for reward/termination
+logic; the policy just isn't told about it explicitly via a dedicated
+obs dimension.
 """
 
 import numpy as np
@@ -43,14 +56,11 @@ class WaypointGymEnv(gym.Env):
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(ACTION_DIM,), dtype=np.float32
         )
-        # 10 floats: pos_error (3), velocity (3), roll/pitch/yaw_error (3),
-        # landing_phase flag (1). The flag is new vs. hover's 9 — nav and
-        # landing genuinely call for different behavior (converge-and-hold
-        # near a waypoint vs. controlled descent-and-stop), so the policy
-        # gets an explicit signal for which regime it's in rather than
-        # having to infer it indirectly from position/velocity alone.
+        # 9 floats: pos_error (3), velocity (3), roll/pitch/yaw_error (3).
+        # Deliberately identical shape to HoverGymEnv's observation_space —
+        # see module docstring for why (weight transfer via --init-from).
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(10,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32
         )
 
         self._waypoints = [np.asarray(wp, dtype=np.float32) for wp in self.task.waypoints]
@@ -86,7 +96,6 @@ class WaypointGymEnv(gym.Env):
                 pos_error,
                 state.velocity,
                 np.array([state.orientation_rpy[0], state.orientation_rpy[1], yaw_error], dtype=np.float32),
-                np.array([1.0 if self._in_landing else 0.0], dtype=np.float32),
             ]
         ).astype(np.float32)
 
