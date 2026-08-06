@@ -7,6 +7,12 @@ point is an honest record of what was tried, not a polished current state.
 Cross-reference `hover-model-plan.md` for what each field means and what
 counts as progress toward a usable model.
 
+**Note (2026-08-06):** hover/stabilize is paused as of Stage 3 completion
+(2026-08-02) to focus on waypoint navigation + landing — see
+`docs/status.md` and `docs/decisions/devlog/2026_08_06.md`. This section
+of the log is frozen at that point; new entries go in the "Waypoint
+Navigation + Landing Model" section below.
+
 ---
 
 ## How to fill this in
@@ -284,3 +290,117 @@ in `config.py` was touched between sessions)
   `device="cpu"` explicitly (previously only training specified this,
   causing a spurious SB3 GPU warning at eval/demo time even though the
   model was trained CPU-only).
+
+---
+
+# Training Log — Waypoint Navigation + Landing Model
+
+Same format/conventions as the hover log above, cross-referencing
+`WaypointTaskConfig` in `config.py` instead of `HoverTaskConfig`. New
+field this task cares about: `--init-from`, since waypoint runs
+warm-start from a hover checkpoint rather than training from random init
+(see `docs/decisions/devlog/2026_08_06.md` for why the observation space
+was kept identical to hover's specifically to allow this).
+
+## Entries
+
+### Run 2026-08-06-0 (sanity)
+
+**Git commit / project state:** first working version of
+`waypoint_gym_wrapper.py`, `waypoint_train.py`, restructured `paths.py`
+(flat `model/model_weights/`, per-task `tb_logs/`).
+
+**Command:**
+```
+python -m src.training.waypoint_train --init-from model/model_weights/hover_stabilize_ppo_seed0.zip --timesteps 5000 --gui
+```
+
+**Environment config** (`WaypointTaskConfig`, defaults, unchanged from `config.py`)
+- `waypoints`: 5-point route, see `config.py` for exact coordinates
+- `episode_len_sec`: 20.0
+- `reset_position_jitter` / `reset_yaw_jitter_deg`: 0.2 / 15.0
+- `max_xy_distance` / `max_altitude` / `max_tilt_rad`: 3.0 / 2.5 / 0.4
+- `landing_target_altitude` / `landing_max_velocity` / `landing_hold_time_sec`: 0.05 / 0.15 / 2.0
+- Reward weights: position=1.0, velocity=0.05, smoothness=0.01, survival=0.01,
+  waypoint_bonus=5.0, landing_velocity_penalty=0.3
+
+**Model config:** loaded from `hover_stabilize_ppo_seed0.zip` (own
+hyperparameters carried over via `PPO.load`, not re-specified) —
+`total_timesteps` override 5000, actual steps run ≈6144
+(`n_steps=2048`-rounded).
+
+**Results:** purely a pipeline check — confirmed env runs end-to-end,
+waypoint advancement and landing-phase switch trigger correctly,
+warm-start load/save works. Not evaluated (too few steps to mean
+anything). Saved to `model/model_weights/waypoint_nav_ppo.zip`
+(unseeded — treated as disposable, expected to be overwritten by real runs).
+
+**Verdict**
+- [x] Inconclusive — pipeline sanity only, not a real training result
+
+**Notes:** `total_timesteps` in the SB3 training-log printout is
+cumulative from the loaded checkpoint's history when using `--init-from`
+(`reset_num_timesteps=False`), not a fresh count — don't misread the
+large printed numbers as this run having done far more work than it did.
+
+### Run 2026-08-06-1
+
+**Git commit / project state:** same code as 2026-08-06-0, no changes
+between these two runs.
+
+**Command:**
+```
+python -m src.training.waypoint_train --init-from model/model_weights/hover_stabilize_ppo_seed0.zip --timesteps 300000 --seed 0
+```
+
+**Environment / model config:** same `WaypointTaskConfig` as
+2026-08-06-0. `--seed 0` passed for the save filename
+(`waypoint_nav_ppo_seed0.zip`) — note per `waypoint_train.py`'s own
+warning, `--seed` is cosmetic/filename-only here since a loaded
+checkpoint carries its own RNG/optimizer state; it does not reseed
+training the way it would for a from-scratch run.
+
+**Hardware / duration:** CPU, ~251s wall-clock for the final logged
+iteration window (147 iterations total this run, per training stdout).
+
+**Results (training, final logged iteration only — full curve not yet
+reviewed, see notes)**
+- `ep_len_mean`: 600 (== max episode length; no episode ended early via
+  crash or success)
+- `ep_rew_mean`: -291
+- `explained_variance`: 0.928
+- `std`: 1.07 (higher than the hover source checkpoint's converged 0.849 —
+  consistent with the policy re-exploring under the new reward landscape,
+  not a red flag on its own)
+- Saved: `waypoint_nav_ppo_seed0.zip`
+
+**Results (eval, `python -m src.training.evaluate.waypoint_evaluate --model model/model_weights/waypoint_nav_ppo_seed0.zip --episodes 20`)**
+- Success rate: **0.0%**
+- Mean waypoints reached: **2.05 / 5**
+- Crash rate: **0.0%** (0/20 — no out_of_bounds, no tilt, no hard_landing)
+- Mean episode reward: -273.5
+- Failure breakdown: 20/20 never finished the route; 0/20 reached the
+  landing phase at all; all 20 failures are `timeout`
+
+**Verdict**
+- [x] Inconclusive — need another run (more timesteps and/or a `--gui`
+  pacing check) before deciding whether this needs more training time or
+  a reward/pacing adjustment
+
+**Notes / what to try next:**
+- Zero crashes across 20 episodes is a genuinely good sign for a first
+  real run off a warm start — stability transferred cleanly from the
+  hover checkpoint.
+- 100% `timeout` with 0% ever reaching the landing phase points at a
+  progress/pacing problem, not a control problem: the policy isn't yet
+  committing to closing 1-2m gaps between waypoints quickly enough to
+  finish a 5-waypoint route in 600 steps / 20s.
+- Full `ep_rew_mean` curve over all 147 iterations not yet reviewed —
+  only the final iteration's numbers were captured. Checking
+  `tb_logs/waypoint_logs` for whether reward was still climbing or had
+  plateaued is the first thing to do before deciding on next steps.
+- Most likely next action: continue fine-tuning from
+  `waypoint_nav_ppo_seed0.zip` (via `--init-from`) for another few
+  hundred k steps, re-run eval, and watch specifically whether `mean
+  waypoints reached` climbs — don't touch reward weights until that's
+  been tried, per the plan in `docs/decisions/devlog/2026_08_06.md`.

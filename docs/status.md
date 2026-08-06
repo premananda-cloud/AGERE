@@ -10,9 +10,10 @@ scratch.
 ## What this project is
 
 Reinforcement learning for a multirotor drone, part of a larger project
-called **Agere** / **Backseat Driver**. Currently working on the first
-task in a planned sequence: **hover/stabilize** — hold station at a fixed
-target point, starting from a randomized nearby position.
+called **Agere** / **Backseat Driver**. Task 1, **hover/stabilize**, is
+complete (Stage 3 met, see below) and paused. Current focus is task 2,
+**waypoint navigation + landing**, scoped for a professor demo rather
+than a full multi-stage campaign — see "Current task" below.
 
 Full system architecture (unchanged, still the long-term target) is in
 `docs/architecture/Architecture.md` — PX4 flight stack + ROS 2 / uXRCE-DDS.
@@ -30,140 +31,108 @@ currently builds.
 
 **Why:** early sessions tried training directly against PX4 SITL +
 Gazebo + MAVSDK. This turned into extensive networking/infra debugging
-(WSL2 loopback-vs-real-interface ambiguity, MAVLink broadcast flag
-hunting, GPU rendering hacks for Gazebo's GUI) that had nothing to do
-with learning RL or building the model. Decision: fully decouple model
-development from flight-stack integration. `AGERE` ships a trained model
-to `AGERE_sims` for plug-and-test; `AGERE_sims`'s integration problems do
-not block or feed back into `AGERE`'s development. See
+that had nothing to do with learning RL or building the model. Decision:
+fully decouple model development from flight-stack integration. See
 `docs/devlog/2026_07_30.md` for the full reasoning.
-
-The old PX4/MAVSDK code that used to live in `AGERE` (parked, then later
-fully removed) is gone from this repo. If it's needed again, it belongs
-in `AGERE_sims`, not here.
 
 ## Simulation framework
 
 Training runs against
 [`gym-pybullet-drones`](https://github.com/learnsyslab/gym-pybullet-drones)
-— in-process PyBullet physics, no network, no SITL. Specifically built on
-top of their `HoverAviary` class as the physics engine (used via
-composition, not by inheriting its Gym-Env-ness into our own code — see
-code structure below).
-
-Key facts about this dependency, established by reading its actual source
-(not assumed from memory):
-- `ActionType.VEL` (what this project uses) = direction vector + speed
-  magnitude, PID-controlled internally via `DSLPIDControl`.
-  **No yaw-rate control** — the internal PID always holds whatever yaw
-  the drone currently has. Acceptable for pure position-hold; would need
-  a different action type if yaw stabilization becomes part of the task.
-- `ObservationType.KIN` = 12-dim kinematic state (position, roll/pitch/yaw,
-  linear velocity, angular velocity), read via `_getDroneStateVector()`.
-- `BaseAviary._housekeeping()` reads `INIT_XYZS`/`INIT_RPYS` fresh on every
-  `reset()` call — this is how true per-episode start-position
-  randomization was implemented (mutate those arrays before calling the
-  parent's `reset()`).
-- Installing it (`pip install -e .` or via `git+https://...` in
-  `environment.yml`) compiles `pybullet` from source — needs a C compiler.
+— in-process PyBullet physics, no network, no SITL. Built on top of their
+`HoverAviary` class as the physics engine (via composition, not
+inheritance — see code structure below). Key facts about this dependency
+(established by reading its source): `ActionType.VEL` = direction vector
++ speed magnitude, PID-controlled internally, **no yaw-rate control**;
+`ObservationType.KIN` = 12-dim kinematic state; `BaseAviary._housekeeping()`
+reads `INIT_XYZS`/`INIT_RPYS` fresh on every `reset()`, which is how
+per-episode start randomization is implemented for both tasks.
 
 ## Code structure (`src/`)
 
-Full rationale in `docs/code-structure.md`. The organizing principle:
-**simulation** (physics facts, doesn't know about RL) is separate from
-**training** (RL design choices: reward, spaces, episode logic).
+Full rationale in `docs/code-structure.md`. Both tasks now exist
+side by side under the same split (simulation vs. training):
 
 ```
 src/
-├── config.py                    All tunable constants:
-│                                   SimConfig       — pyb_freq, ctrl_freq, gui
-│                                   HoverTaskConfig — target position, episode
-│                                                     length, reset jitter,
-│                                                     termination bounds,
-│                                                     reward weights
-│                                   PPOConfig       — PPO hyperparameters
-│
-├── actions/velocity_action.py   Defines what a raw 4-vector action MEANS
-│                                 physically (direction + speed). No
-│                                 gymnasium import, no PX4.
-│
-├── environments/drone_sim.py    DroneSim: pure PyBullet wrapper around
-│                                 gym-pybullet-drones' HoverAviary. No
-│                                 reward, no episode logic, no Gymnasium
-│                                 spaces exposed at this layer — just
-│                                 reset_episode() / apply_action() /
-│                                 get_state() / draw_target_marker() /
-│                                 close(). NOTE: the underlying HoverAviary
-│                                 class IS itself a gymnasium.Env internally
-│                                 (that's baked into the third-party
-│                                 library) — this wrapper doesn't re-expose
-│                                 that, but it's not a from-scratch physics
-│                                 implementation either. Known, accepted
-│                                 tradeoff, not hidden.
-│
-├── models/networks.py           Placeholder for custom feature extractors.
-│                                 Empty — not needed yet (12-dim obs is
-│                                 small). Extension point for later (e.g.
-│                                 vision/LiDAR input for obstacle avoidance).
-│
-├── policies/ppo_policy.py       build_ppo(env, config) — constructs SB3
-│                                 PPO. Track-agnostic; only file that knows
-│                                 we're using PPO specifically.
-│
+├── config.py                       SimConfig, HoverTaskConfig,
+│                                    WaypointTaskConfig, PPOConfig,
+│                                    ProjectConfig (task: Hover | Waypoint)
+├── actions/velocity_action.py      Shared by both tasks, unchanged
+├── environments/drone_sim.py       Shared by both tasks. DroneSim — pure
+│                                    PyBullet, no Gymnasium. Gained
+│                                    color/radius params on
+│                                    draw_target_marker() for waypoint
+│                                    marker differentiation.
+├── models/networks.py              Still empty/placeholder
+├── policies/ppo_policy.py          Shared by both tasks, unchanged
 └── training/
-    ├── gym_wrapper.py           HoverGymEnv(gymnasium.Env) — THIS is where
-    │                             Gymnasium lives. Action/observation
-    │                             spaces, reward function, episode
-    │                             termination/truncation logic. Wraps
-    │                             DroneSim. step() returns an info dict
-    │                             with truncation_reason ("out_of_bounds" /
-    │                             "tilt" / "timeout"), is_crash (bool —
-    │                             timeout ≠ crash), and position_error_norm.
-    ├── train.py                 Entry point: python -m src.training.train
-    │                             [--gui] [--timesteps N]
-    ├── evaluate.py               python -m src.training.evaluate
-    │                             [--model path] [--episodes N] [--gui]
-    │                             Runs the saved model deterministically,
-    │                             reports mean final position error + crash
-    │                             rate against Stage 2 criteria (below).
-    └── demo.py                   python -m src.training.demo [--model path]
-                                  [--episodes N]
-                                  Live PyBullet GUI demo for showing to
-                                  other people — loops episodes, paced to
-                                  real time via gym-pybullet-drones' own
-                                  sync() helper, draws a green marker at
-                                  the target position.
+    ├── hover_train.py              Hover entry point
+    ├── waypoint_train.py           Waypoint entry point — has an extra
+    │                                --init-from flag hover_train.py
+    │                                doesn't, to warm-start from an
+    │                                existing checkpoint (see below)
+    ├── gym_wrapper/
+    │   ├── hover_gym_wrapper.py    HoverGymEnv, 9-dim obs
+    │   └── waypoint_gym_wrapper.py WaypointGymEnv, ALSO 9-dim obs
+    │                                (deliberately shape-identical to
+    │                                hover's — see "Weight transfer" below)
+    ├── evaluate/
+    │   ├── hover_evaluate.py
+    │   ├── hover_evaluate_disturbance.py
+    │   └── waypoint_evaluate.py
+    └── demo/
+        ├── hover_demo.py
+        └── waypoint_demo.py         KNOWN BROKEN — see "Known issues"
 ```
 
-## Reward function (in `gym_wrapper.py`)
+### Weight transfer: why waypoint's obs space matches hover's exactly
 
-```
-reward = -w_pos * ||target_position - position||
-         -w_vel * ||velocity||
-         -w_smooth * ||action_t - action_{t-1}||
-         +survival_bonus
-```
-Default weights: `position_error_weight=1.0`, `velocity_penalty_weight=0.05`,
-`action_smoothness_weight=0.01`, `survival_bonus=0.01`. Custom — not
-`HoverAviary`'s built-in `max(0, 2 - ||pos_error||**4)` reward.
+`WaypointGymEnv` was originally drafted with a 10th observation dimension
+(a `landing_phase` flag) that hover's env doesn't have. This was dropped
+once weight transfer became the plan: SB3's `PPO.load()` rebuilds a
+policy's input layer from the saved observation shape, so a 9-vs-10
+mismatch would make a hover checkpoint unloadable into the waypoint env.
+Since the hover-trained policy already knows "minimize position error,
+don't move too fast" — most of what waypoint-following needs — that was
+judged more valuable than explicit phase-awareness. The landing phase is
+still tracked internally (`WaypointGymEnv._in_landing`) for reward and
+termination logic; it's just not a dedicated input to the policy.
 
-## Definition of done (full detail in `docs/hover-model-plan.md`)
+This is why `waypoint_train.py --init-from <hover checkpoint>.zip` works
+at all — see `docs/decisions/devlog/2026_08_06.md` for the full reasoning
+and `docs/training-log.md`'s waypoint section for the run this produced.
+
+## Model / log directory layout (as of 2026-08-06)
+
+- `model/model_weights/` — **one flat directory for all tasks.** Tasks
+  are told apart by filename prefix (`hover_stabilize_ppo*.zip` vs.
+  `waypoint_nav_ppo*.zip`), not by subdirectory. This replaced an earlier
+  one-subdirectory-per-task layout.
+- `tb_logs/hover_logs/`, `tb_logs/waypoint_logs/` — **still split per
+  task** (unlike the flat model dir) since TensorBoard runs are compared
+  within a task, not across tasks.
+- `src/paths.py` is the single source of truth for both — never
+  hardcode a save/load path elsewhere.
+
+---
+
+## Task 1: Hover/Stabilize — COMPLETE, PAUSED
+
+### Definition of done (full detail in `docs/hover-model-plan.md`)
 
 Staged, not binary:
-- **Stage 0** — pipeline sanity (env installs, training runs without error)
-- **Stage 1** — learning signal present (reward trending, episodes surviving longer)
+- **Stage 0** — pipeline sanity
+- **Stage 1** — learning signal present
 - **Stage 2** — usable/viable baseline: mean final position error < 0.3 m,
   crash rate < 10%, over 20 eval episodes
 - **Stage 3** — robust hover: same criteria hold across 3+ random seeds,
   position error < 0.1 m, recovers from mid-episode disturbance
 - **Stage 4** — transplant-ready (belongs to `AGERE_sims`, out of scope here)
 
-## Current status: **Stage 3 criteria 1 & 2 met; criterion 3 not started** (as of 2026-08-02)
+### Status: **Stage 3 fully complete** (as of 2026-08-02)
 
-Stage 2 (usable/viable baseline) was reached 2026-07-31. This session
-diagnosed and resolved the 07-31 model's position-error tail (undertraining,
-not reward shape — resolved by training 500,000 timesteps instead of
-200,000) and completed the required 3-seed set:
+All three criteria met:
 
 | Seed | Mean pos error | Crash rate | Notes |
 |---|---|---|---|
@@ -171,87 +140,117 @@ not reward shape — resolved by training 500,000 timesteps instead of
 | 1 | 0.015 m | 0% | clean, best result to date |
 | 2 | 0.018 m | 0% | clean |
 
-**All three seeds individually clear both the 0.1 m mean-error bar and
-the 10% crash-rate bar.** Stage 3 criteria 1 ("Stage 2 holds across 3+
-seeds") and 2 ("mean position error < 0.1 m") are met. The seed-0 tilt
-crash didn't recur in seeds 1 or 2 — reasonable evidence it was a rare
-fluke rather than a systemic issue, though n=3 seeds × 20 episodes isn't
-large enough to rule it out with high confidence.
+Criterion 3 (disturbance recovery) also built and passing this session —
+`hover_evaluate_disturbance.py`, velocity-kick mechanism, 0.2 m/s tested
+across seeds, all recovered within the configured window.
 
-**Not started: Stage 3 criterion 3** — recovery from a mid-episode
-external disturbance. No code exists yet to inject a disturbance
-mid-episode, and "recovers... within a few seconds" isn't yet a concrete,
-checkable number.
+**Decision (2026-08-06):** rather than continue polishing hover
+(diminishing returns, criteria already comfortably cleared), paused here
+to spend the remaining demo-prep time on waypoint navigation + landing —
+see `docs/planning/stage3-push-plan.md` for the scoping call and
+`docs/decisions/devlog/2026_08_06.md` for the session this pivot happened in.
 
-Full run details in `docs/training-log.md` (runs `2026-08-01-0`,
-`2026-08-01-1`, `2026-08-02-0`) and `docs/01-08-2026.md`. Repo layout for
-weights/logs changed this session too — see `docs/conventions.md`:
-`model/` and `tb_logs/` are now `.gitignore`d and pushed to Hugging Face
-instead, with `src/paths.py` as the single source of truth for save/load
-paths across all training entry points.
+Full run details in `docs/training-log.md`'s hover section (runs
+`2026-07-31-0` through `2026-08-02-0`).
 
-### Prior status: Stage 2 reached (2026-07-31 run)
+---
 
-Real evaluation results, `python -m src.training.evaluate`, 20 episodes,
-deterministic policy:
-- Mean final position error: **0.088 m** (well under the 0.3 m bar)
-- Crash rate: **0%** (every episode ran the full 240 steps)
-- Mean episode reward: -29.0
-- **Caveat worth carrying forward:** not uniform — 2 of 20 episodes
-  reached 0.24–0.29 m, right up against the Stage 2 ceiling, and
-  correlated with the worst-reward episodes (-55 to -75). This is a real
-  tail in the policy's behavior, not just noise around a tight mean.
-  Relevant to whether Stage 3 (tighter 0.1 m bar, 3+ seeds) will pass
-  without further training or reward tuning.
+## Task 2: Waypoint Navigation + Landing — IN PROGRESS
 
-Full run details logged in `docs/training-log.md` (run `2026-07-31-0`) —
-check there for exact config values used, since defaults in `config.py`
-may have changed since.
+### Scope (demo, not full campaign)
 
-## Known issues / environment gotchas
+- 4-6 waypoints in sequence (currently 5, see `WaypointTaskConfig` in
+  `config.py`), then a soft landing (touchdown velocity ≤ 0.15 m/s, held
+  ~2s)
+- Success bar: **one seed with a consistently good success rate
+  (~15/20+)**, not hover's three-seed robustness requirement
+- Timeline: design → sanity run → real run → landing-specific tuning →
+  full run → eval/demo → buffer
 
-- **`setuptools>=82` breaks `gym-pybullet-drones`.** It imports
-  `pkg_resources` internally (`BaseAviary.py`), which setuptools removed
-  in version 82+. Fix: pin `setuptools<82` in `environment.yml` (already
-  done as of the version referenced in this handoff — verify it's still
-  there).
-- **`device="cpu"` is set in `ppo_policy.py`.** (Confirmed 2026-08-01 —
-  earlier versions of this handoff said this was "not yet done"; that was
-  stale. No action needed.)
-- Runtime verification of new code in this project has generally been done
-  by the project owner locally, not by whichever LLM wrote the code —
-  earlier sessions were built inside a sandboxed environment that couldn't
-  finish compiling `pybullet` (execution time limits), so code was
-  syntax-checked and logic-traced against the actual gym-pybullet-drones
-  source, then handed off for real testing. This has generally gone well,
-  but don't assume newly-written code in this repo has been run
-  end-to-end unless a human confirms it. As of 2026-08-01, this has held:
-  the `evaluate.py`/`train.py`/`ppo_policy.py` changes from this session
-  were syntax-checked only before handoff, then run and iterated on
-  (including two follow-up bugfixes to `evaluate.py`'s tail/crash
-  reporting) once real results came back.
+### Status: pipeline built and running; policy not yet converging on
+### full-route completion (as of 2026-08-06)
 
-## Suggested next steps (as of 2026-08-02 session)
+All pipeline pieces exist and run end-to-end: `WaypointTaskConfig`,
+`WaypointGymEnv`, `waypoint_train.py` (with `--init-from` warm-start),
+`waypoint_evaluate.py`. `waypoint_demo.py` is the one broken piece — see
+Known Issues.
 
-1. Build the disturbance-recovery eval mode (Stage 3 criterion 3, the
-   only remaining piece) — needs `environments/drone_sim.py` reviewed for
-   where to hook PyBullet's `applyExternalForce`, and a concrete numeric
-   threshold for "recovers within a few seconds."
-2. If a firmer answer on the seed-0 tilt crash is wanted before calling
-   Stage 3 fully closed: more than one eval run per seed, or a 4th/5th
-   training seed, would sharpen the "fluke vs. rare tendency" read beyond
-   what 3 seeds × 20 episodes can support.
-3. Once criterion 3 is built and passes, Stage 3 is complete — decide
-   whether to invest further in this task or move to the next one
-   (waypoint navigation), per `hover-model-plan.md`'s own note not to
-   over-polish one stage before checking design generalization.
+**First real training run** (300k timesteps, warm-started from
+`hover_stabilize_ppo_seed0.zip`, saved as `waypoint_nav_ppo_seed0.zip`) —
+eval results, 20 episodes:
+
+| Metric | Result |
+|---|---|
+| Success rate | 0.0% |
+| Mean waypoints reached | 2.05 / 5 |
+| Crash rate | **0.0%** |
+| Failure breakdown | 20/20 timeout; 0/20 ever reached landing phase |
+
+**Read on this:** the good sign is zero crashes — stability transferred
+cleanly from the hover warm-start. The expected-at-this-stage part is
+that it never finishes the route: every failure is a plain timeout, none
+made it as far as attempting a landing. This points at a
+progress/pacing issue (not committing to closing 1-2m gaps between
+waypoints quickly enough within the 600-step/20s budget), not a control
+issue. Full diagnosis and next-step plan in
+`docs/decisions/devlog/2026_08_06.md`; run details in
+`docs/training-log.md`'s waypoint section.
+
+### Open items
+
+- `waypoint_bonus=5.0` — untuned guess, still untested in practice since
+  no episode has progressed far enough for it to matter much yet.
+- Landing "success" is altitude+velocity-based, not real PyBullet contact
+  detection — a deliberate scope simplification for the demo, untested
+  in practice so far since nothing has reached the landing phase.
+- **`waypoint_demo.py` is broken** — currently a byte-for-byte duplicate
+  of `waypoint_evaluate.py` (looks like a copy-paste-and-forget-to-replace
+  mistake from an earlier session). No live-GUI/real-time-paced/colored-
+  marker demo script actually exists yet. Not urgent while there's no
+  policy worth demoing, but needs real writing before the demo date.
+  Also flagged from before: whenever it does get written, it'll need to
+  reach into `WaypointGymEnv`'s private `_waypoints`/`_waypoint_idx` for
+  marker drawing — works, but not a clean public interface.
+- Policy not yet reliably finishing the waypoint route — see status
+  table above. Not diagnosed further than "probably needs more
+  fine-tuning timesteps, possibly a pacing/episode-length check" as of
+  today; see devlog for the concrete next-step plan.
+
+### Next action
+
+Per `docs/decisions/devlog/2026_08_06.md`: check the full `ep_rew_mean`
+curve in `tb_logs/waypoint_logs` for today's run (only the final
+iteration's numbers were captured in the log so far), then most likely
+continue fine-tuning from `waypoint_nav_ppo_seed0.zip` for another few
+hundred k steps before touching any reward weights.
+
+---
+
+## Known issues / environment gotchas (both tasks)
+
+- **`setuptools>=82` breaks `gym-pybullet-drones`.** Pin
+  `setuptools<82` in `environment.yml`.
+- **`device="cpu"` is set in `ppo_policy.py`** and passed explicitly at
+  eval/demo load time too — confirmed present, no action needed.
+- Runtime verification of new code in this project has generally been
+  done by the project owner locally, not by whichever LLM wrote the
+  code — code gets syntax-checked and logic-traced against source before
+  handoff, then run and iterated on with real results. This has held for
+  the waypoint-task code added 2026-08-06 as well.
+- `--init-from`'s `total_timesteps` counter in SB3's training-log
+  printout is cumulative from the loaded checkpoint's own history
+  (`reset_num_timesteps=False`), not a fresh count for the current run —
+  don't misread large printed step counts as more work having been done
+  than actually was.
 
 ## Other docs in this repo worth reading, in rough priority order
 
-1. `docs/code-structure.md` — full reasoning for the src/ layout above
-2. `docs/hover-model-plan.md` — full task spec + staged completion criteria
-3. `docs/stage3-push-plan.md` — working plan for the current Stage 3 push
-4. `docs/training-log.md` — living log, one entry per training run
-5. `docs/01-08-2026.md` — session record for the 2026-08-01 Stage 3 push
+1. `docs/decisions/devlog/2026_08_06.md` — most recent session, waypoint
+   task build + first real run + diagnosis
+2. `docs/code-structure.md` — full reasoning for the src/ layout above
+3. `docs/hover-model-plan.md` — hover task spec + staged completion criteria
+4. `docs/planning/stage3-push-plan.md` — hover Stage 3 push + the pivot
+   decision to waypoint nav
+5. `docs/training-log.md` — living log, one entry per training run, both tasks
 6. `docs/devlog/2026_07_30.md` — the AGERE/AGERE_sims split decision
 7. `docs/architecture/Architecture.md` — long-term system architecture (PX4/ROS2)
