@@ -41,3 +41,23 @@ def hover_stabilize_model_path(seed: int | None = None) -> Path:
     HOVER_STABILIZE_MODEL_DIR.mkdir(parents=True, exist_ok=True)
     name = f"hover_stabilize_ppo_seed{seed}" if seed is not None else "hover_stabilize_ppo"
     return HOVER_STABILIZE_MODEL_DIR / f"{name}.zip"
+
+
+# --- waypoint navigation + landing task ------------------------------------
+WAYPOINT_MODEL_DIR = MODEL_ROOT / "waypoint_nav"
+WAYPOINT_TB_LOG_DIR = TB_LOG_ROOT / "waypoint_nav"
+
+
+def waypoint_model_path(seed: int | None = None) -> Path:
+    """Standard save/load path for a waypoint-nav PPO checkpoint.
+
+    seed=None -> model/waypoint_nav/waypoint_nav_ppo.zip
+    seed=N    -> model/waypoint_nav/waypoint_nav_ppo_seedN.zip
+
+    Same pattern as hover_stabilize_model_path() above — creates the
+    directory if needed, safe to call before saving or when just reading
+    an existing path for loading.
+    """
+    WAYPOINT_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    name = f"waypoint_nav_ppo_seed{seed}" if seed is not None else "waypoint_nav_ppo"
+    return WAYPOINT_MODEL_DIR / f"{name}.zip"

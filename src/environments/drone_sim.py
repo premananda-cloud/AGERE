@@ -151,17 +151,22 @@ class DroneSim:
             physicsClientId=self._aviary.CLIENT,
         )
 
-    def draw_target_marker(self, position: np.ndarray):
+    def draw_target_marker(self, position: np.ndarray, color: tuple = (0.2, 0.9, 0.2, 0.5), radius: float = 0.05):
         """Draw a visual-only sphere at `position` (GUI mode only — no
-        physical effect on the sim). Purely for presentations/demos so a
-        viewer can see what the drone is trying to hold station at, since
-        gym-pybullet-drones' GUI doesn't show the target by default."""
+        physical effect on the sim). Purely for presentations/demos.
+
+        color/radius are parameterized (not hardcoded) so callers with
+        multiple markers to distinguish — e.g. a waypoint route showing
+        passed/current/upcoming stops — can vary appearance per call without
+        needing a second method. Defaults match the original single-target
+        hover marker exactly, so HoverGymEnv/hover_demo.py callers are
+        unaffected by this change."""
         import pybullet as p
 
         if not self.sim_config.gui:
             return
         visual_shape = p.createVisualShape(
-            p.GEOM_SPHERE, radius=0.05, rgbaColor=[0.2, 0.9, 0.2, 0.5],
+            p.GEOM_SPHERE, radius=radius, rgbaColor=list(color),
             physicsClientId=self._aviary.CLIENT,
         )
         p.createMultiBody(
