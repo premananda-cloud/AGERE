@@ -28,12 +28,16 @@ flat dump of every task's checkpoints in one folder, and not reusing
 
 ## `src/paths.py` is the single source of truth
 
-`train.py`, `evaluate.py`, `demo.py`, and `demo_intel.py` all import their
-save/load paths from `src/paths.py` rather than each hardcoding (or
-independently guessing) a location. If you're adding a new task's
-training entry point, add its path constants and a
-`<task_name>_model_path()` helper function there, following the same
-pattern as `hover_stabilize_model_path()` — don't invent a new
+`src/training/hover_train.py`, `src/training/evaluate/hover_evaluate.py`,
+`src/training/evaluate/hover_evaluate_disturbance.py`, and
+`src/training/demo/hover_demo.py` all import their save/load paths from
+`src/paths.py` rather than each hardcoding (or independently guessing) a
+location. (`demo_intel.py`, a Mesa/OpenGL-compatibility variant of the
+demo script, has been removed — re-add something like it under
+`src/training/demo/` if that need resurfaces.) If you're adding a new
+task's training entry point, add its path constants and a
+`<task_name>_model_path()` helper function to `src/paths.py`, following
+the same pattern as `hover_stabilize_model_path()` — don't invent a new
 per-script convention.
 
 **Why centralize this:** before this convention, `train.py` saved to
@@ -79,8 +83,11 @@ new checkpoint:
 
 1. Add `<task_name>_model_path(seed=None)` and the matching `MODEL_DIR`/
    `TB_LOG_DIR` constants to `src/paths.py`.
-2. Point that task's `train.py`-equivalent, `evaluate.py`-equivalent, etc.
-   at those helpers — same pattern as hover/stabilize's four entry points.
+2. Point that task's `hover_train.py`-equivalent,
+   `evaluate/hover_evaluate.py`-equivalent, etc. at those helpers — same
+   pattern as hover/stabilize's entry points (one training script directly
+   under `training/`, plus `demo/`, `evaluate/`, and `gym_wrapper/`
+   subpackages for the others).
 3. Confirm `model/<task_name>/` and `tb_logs/<task_name>/` fall under the
    existing `.gitignore` rules (they should, if those rules are on the
    parent `model/`/`tb_logs/` directories rather than hover-specific

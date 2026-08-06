@@ -31,11 +31,11 @@ effective "kick" is much weaker than --force-magnitude alone suggests,
 for that reason.
 
 Usage:
-    python -m src.training.evaluate_disturbance
-    python -m src.training.evaluate_disturbance --model model/hover_stabilize/hover_stabilize_ppo_seed1.zip
-    python -m src.training.evaluate_disturbance --kick-speed 2.0 --episodes 10
-    python -m src.training.evaluate_disturbance --mechanism impulse_force --force-magnitude 0.3
-    python -m src.training.evaluate_disturbance --gui   # watch the kick happen
+    python -m src.training.evaluate.hover_evaluate_disturbance
+    python -m src.training.evaluate.hover_evaluate_disturbance --model model/hover_stabilize/hover_stabilize_ppo_seed1.zip
+    python -m src.training.evaluate.hover_evaluate_disturbance --kick-speed 2.0 --episodes 10
+    python -m src.training.evaluate.hover_evaluate_disturbance --mechanism impulse_force --force-magnitude 0.3
+    python -m src.training.evaluate.hover_evaluate_disturbance --gui   # watch the kick happen
 """
 
 import argparse
@@ -45,7 +45,7 @@ from stable_baselines3 import PPO
 
 from src.config import ProjectConfig
 from src.paths import hover_stabilize_model_path
-from src.training.gym_wrapper import HoverGymEnv
+from src.training.gym_wrapper.hover_gym_wrapper import HoverGymEnv
 
 
 def run_episode(

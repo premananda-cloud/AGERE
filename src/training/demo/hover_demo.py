@@ -1,19 +1,21 @@
 """
 Live PyBullet demo of the trained hover/stabilize policy — for showing to
-other people, not for evaluation (see evaluate.py for that).
+other people, not for evaluation (see evaluate/hover_evaluate.py for that).
 
 Runs continuously, looping episodes, at real-time speed so it's watchable.
 Draws a green marker at the target position so viewers can see what the
 drone is trying to hold station at.
 
 On Intel integrated graphics with no dedicated GPU, this may fail to open
-the GUI window or render a black screen — see demo_intel.py, which is
-identical except for Mesa/OpenGL compatibility flags.
+the GUI window or render a black screen. (demo_intel.py used to carry a
+Mesa/OpenGL-compatibility variant of this script for that case; it's been
+removed — if that problem resurfaces, re-add a variant here rather than
+assuming one still exists elsewhere.)
 
 Usage:
-    python -m src.training.demo
-    python -m src.training.demo --model hover_stabilize_ppo.zip
-    python -m src.training.demo --episodes 5   # stop after N episodes instead of looping forever
+    python -m src.training.demo.hover_demo
+    python -m src.training.demo.hover_demo --model hover_stabilize_ppo.zip
+    python -m src.training.demo.hover_demo --episodes 5   # stop after N episodes instead of looping forever
 """
 
 import argparse
@@ -24,7 +26,7 @@ from gym_pybullet_drones.utils.utils import sync
 
 from src.config import ProjectConfig
 from src.paths import hover_stabilize_model_path
-from src.training.gym_wrapper import HoverGymEnv
+from src.training.gym_wrapper.hover_gym_wrapper import HoverGymEnv
 
 
 def main():
