@@ -10,10 +10,10 @@ with randomized starts, and reports:
   - mean episode reward, for reference against training-log.md entries
 
 Usage:
-    python -m src.training.evaluate
-    python -m src.training.evaluate --model model/hover_stabilize/hover_stabilize_ppo_seed0.zip
-    python -m src.training.evaluate --episodes 20
-    python -m src.training.evaluate --gui   # watch the eval episodes
+    python -m src.training.evaluate.hover_evaluate
+    python -m src.training.evaluate.hover_evaluate --model model/hover_stabilize/hover_stabilize_ppo_seed0.zip
+    python -m src.training.evaluate.hover_evaluate --episodes 20
+    python -m src.training.evaluate.hover_evaluate --gui   # watch the eval episodes
 
 Defaults to model/hover_stabilize/hover_stabilize_ppo.zip if --model isn't
 given (see src/paths.py).
@@ -26,7 +26,7 @@ from stable_baselines3 import PPO
 
 from src.config import ProjectConfig
 from src.paths import hover_stabilize_model_path
-from src.training.gym_wrapper import HoverGymEnv
+from src.training.gym_wrapper.hover_gym_wrapper import HoverGymEnv
 
 # Stage 2 criteria, per docs/hover-model-plan.md — keep these two files in
 # sync if the plan changes.

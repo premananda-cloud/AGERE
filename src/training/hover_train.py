@@ -6,10 +6,10 @@ docs/code-structure.md for how environments/, actions/, and training/
 divide responsibilities.
 
 Usage:
-    python -m src.training.train
-    python -m src.training.train --gui               # watch training live
-    python -m src.training.train --timesteps 500000  # override config
-    python -m src.training.train --seed 0            # for Stage 3's multi-seed requirement
+    python -m src.training.hover_train
+    python -m src.training.hover_train --gui               # watch training live
+    python -m src.training.hover_train --timesteps 500000  # override config
+    python -m src.training.hover_train --seed 0            # for Stage 3's multi-seed requirement
 
 Saves to model/hover_stabilize/hover_stabilize_ppo[_seed{N}].zip (see
 src/paths.py) — not the working directory.
@@ -19,7 +19,7 @@ import argparse
 
 from src.config import ProjectConfig
 from src.paths import hover_stabilize_model_path, HOVER_STABILIZE_TB_LOG_DIR
-from src.training.gym_wrapper import HoverGymEnv
+from src.training.gym_wrapper.hover_gym_wrapper import HoverGymEnv
 from src.policies.ppo_policy import build_ppo
 
 
