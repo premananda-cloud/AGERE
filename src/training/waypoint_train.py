@@ -17,6 +17,17 @@ most of what waypoint-following needs; what still has to be learned from
 that starting point is following a *moving* target and the landing-phase
 behavior specifically.
 
+IMPORTANT — hyperparameters on a warm-started run (2026-08-08):
+PPO.load() restores hyperparameters (gamma, ent_coef, learning_rate, etc.)
+from the checkpoint file itself, NOT from config.ppo. That means
+config.waypoint_ppo_config()'s gamma/ent_coef values (tuned specifically
+to fix the entropy-runaway problem found in tb_logs analysis — see
+config.py's docstring on that function) would silently have NO EFFECT on
+an --init-from run unless explicitly reapplied to the loaded model after
+PPO.load(). This script now does that explicitly (see the "Note:
+overriding" print below) — do not remove that step, or config changes to
+waypoint_ppo_config() will look like they did nothing on the next run.
+
 Usage:
     python -m src.training.waypoint_train
     python -m src.training.waypoint_train --gui
@@ -26,14 +37,24 @@ Usage:
     python -m src.training.waypoint_train --init-from model/model_weights/waypoint_nav_ppo.zip   # resume own run
 
 Saves to model/model_weights/waypoint_nav_ppo[_seed{N}].zip (see
-src/paths.py) — not the working directory.
+src/paths.py) — not the working directory. Also archives a timestamped
+copy under model/model_weights/history/ every run (see "Archiving" below)
+so repeated/rerun/interrupted attempts against the same --seed can't
+silently overwrite a previous run's result before it's been evaluated —
+this happened 2026-08-06/07 (three separate runs all wrote to the same
+waypoint_nav_ppo_seed0.zip; which run's weights ended up on disk could
+only be reconstructed after the fact by cross-referencing tb_logs
+wall-clock timestamps against the file's mtime).
 """
 
 import argparse
+import shutil
+from datetime import datetime
+from pathlib import Path
 
 from stable_baselines3 import PPO
 
-from src.config import ProjectConfig, WaypointTaskConfig
+from src.config import ProjectConfig, WaypointTaskConfig, waypoint_ppo_config
 from src.paths import waypoint_model_path, WAYPOINT_TB_LOG_DIR
 from src.training.gym_wrapper.waypoint_gym_wrapper import WaypointGymEnv
 from src.policies.ppo_policy import build_ppo
@@ -47,8 +68,12 @@ def main():
         "--seed", type=int, default=None,
         help="Training seed, passed to SB3's PPO. Only used for a from-scratch run "
              "(--init-from not given) — a loaded checkpoint already has its own RNG "
-             "state and this is ignored, since re-seeding a warm-started model doesn't "
-             "mean the same thing as seeding one from random init."
+             "state and this is ignored for training purposes, since re-seeding a "
+             "warm-started model doesn't mean the same thing as seeding one from "
+             "random init. Still used for the save filename either way (see "
+             "src/paths.py) so repeated --init-from runs against the same nominal "
+             "seed land in the same base filename — see 'Archiving' above for why "
+             "that no longer means losing earlier results."
     )
     parser.add_argument(
         "--init-from", type=str, default=None,
@@ -58,11 +83,13 @@ def main():
              "docstring for why the obs/action spaces line up. Also works pointed at a "
              "previous waypoint_nav checkpoint, to continue an interrupted/short run. "
              "PPO hyperparameters (learning_rate, ent_coef, net_arch, etc.) come from "
-             "the loaded checkpoint, NOT from config.ppo, when this is set."
+             "the loaded checkpoint by default — EXCEPT gamma and ent_coef, which this "
+             "script now explicitly overrides from config.waypoint_ppo_config() after "
+             "load (see module docstring's IMPORTANT note)."
     )
     args = parser.parse_args()
 
-    config = ProjectConfig(task=WaypointTaskConfig())
+    config = ProjectConfig(task=WaypointTaskConfig(), ppo=waypoint_ppo_config())
     if args.gui:
         config.sim.gui = True
     if args.timesteps:
@@ -72,8 +99,22 @@ def main():
 
     if args.init_from:
         if args.seed is not None:
-            print(f"Note: --seed {args.seed} is ignored when warm-starting via --init-from.")
+            print(f"Note: --seed {args.seed} is ignored for training when warm-starting via --init-from "
+                  f"(still used for the save filename).")
         model = PPO.load(args.init_from, env=env, device="cpu", tensorboard_log=str(WAYPOINT_TB_LOG_DIR))
+
+        # See module docstring's IMPORTANT note: PPO.load() restores the
+        # checkpoint's own gamma/ent_coef, which silently defeats
+        # config.waypoint_ppo_config() unless we override here explicitly.
+        old_gamma, old_ent_coef = model.gamma, model.ent_coef
+        model.gamma = config.ppo.gamma
+        model.ent_coef = config.ppo.ent_coef
+        print(
+            f"Overriding warm-started model's hyperparameters: "
+            f"gamma {old_gamma} -> {model.gamma}, ent_coef {old_ent_coef} -> {model.ent_coef} "
+            f"(from config.waypoint_ppo_config(), not the loaded checkpoint's own values)."
+        )
+
         # reset_num_timesteps=False: continues the TensorBoard step count and
         # PPO's internal counters from where the loaded checkpoint left off,
         # rather than restarting at step 0 and overwriting/confusing the
@@ -86,9 +127,22 @@ def main():
 
     # Standard location: model/model_weights/waypoint_nav_ppo[_seedN].zip
     # (see src/paths.py) — not the working directory.
-    save_path = waypoint_model_path(args.seed)
+    save_path = Path(waypoint_model_path(args.seed))
     model.save(str(save_path))
     print(f"\nSaved model to {save_path}")
+
+    # Archiving: always keep a timestamped copy alongside the standard
+    # save path, so a rerun against the same --seed (intentional restart,
+    # or an interrupted attempt run again) can never silently destroy a
+    # previous run's result before anyone's looked at it. See module
+    # docstring for the incident this addresses. Cheap (a few MB per run)
+    # relative to the cost of losing an unevaluated checkpoint again.
+    history_dir = save_path.parent / "history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+    history_path = history_dir / f"{save_path.stem}_{run_tag}{save_path.suffix}"
+    shutil.copy(str(save_path), str(history_path))
+    print(f"Archived a timestamped copy to {history_path}")
 
     env.close()
 

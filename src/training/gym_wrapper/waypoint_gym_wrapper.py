@@ -32,6 +32,26 @@ which is most of what waypoint-following needs anyway. The landing phase
 is tracked internally (self._in_landing) and used for reward/termination
 logic; the policy just isn't told about it explicitly via a dedicated
 obs dimension.
+
+BUGFIX 2026-08-08 — stale obs on intermediate waypoint transitions:
+waypoint_evaluate.py's per-leg "closest approach" diagnostic (added the
+same day) reported every stuck episode getting within ~0.148m of its
+target regardless of actual outcome — including episodes that timed out
+1.4m from the landing target, which is impossible if the number were
+real. Root cause: step() only re-derived obs after a transition into the
+LANDING phase (self._in_landing guard below), not after an intermediate
+waypoint transition (1->2, 2->3, 3->4). On any transition step, obs (and
+therefore that step's reward and info["position_error_norm"]) was left
+computed against the just-passed target instead of the new one — the
+exact staleness the original comment already described for the landing
+case, just not generalized to every case that has it. Fixed by dropping
+the self._in_landing condition: any waypoint_bonus > 0 means a
+transition just happened and obs needs re-deriving, landing or not. This
+also means training itself was getting a (narrow — one step out of ~600
+per episode) wrong observation/reward on every intermediate transition;
+not expected to be a major factor in the low route-completion rate, but
+worth being aware of if re-evaluating older checkpoints trained before
+this fix.
 """
 
 import numpy as np
@@ -231,11 +251,18 @@ class WaypointGymEnv(gym.Env):
 
         obs = self._obs_from_state(state)
         waypoint_bonus = self._advance_waypoint_if_reached(obs)
-        # Re-derive obs if this step just flipped into landing: pos_error
-        # in obs above was computed against the *pre-advance* target, which
-        # would be one step stale (still the just-reached waypoint, not the
-        # landing target) for the very step the route completes.
-        if self._in_landing and waypoint_bonus > 0.0:
+        # BUGFIX 2026-08-08: re-derive obs on ANY waypoint transition, not
+        # just the transition into landing. pos_error in obs above was
+        # computed against the *pre-advance* target, which is one step
+        # stale (still the just-reached waypoint, not the new current
+        # target) for the step ANY waypoint is reached — intermediate
+        # waypoints included, not just the final one. Previously this
+        # only fired on `self._in_landing and waypoint_bonus > 0.0`,
+        # which silently left every intermediate transition (1->2, 2->3,
+        # 3->4) stale — found via waypoint_evaluate.py's per-leg
+        # diagnostic reporting impossible "closest approach" values
+        # (~0.148m on legs that actually ended 1.4m from target).
+        if waypoint_bonus > 0.0:
             obs = self._obs_from_state(state)
 
         reward = self._compute_reward(obs, action, waypoint_bonus)

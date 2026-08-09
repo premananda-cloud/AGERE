@@ -404,3 +404,222 @@ reviewed, see notes)**
   hundred k steps, re-run eval, and watch specifically whether `mean
   waypoints reached` climbs — don't touch reward weights until that's
   been tried, per the plan in `docs/decisions/devlog/2026_08_06.md`.
+
+### Run 2026-08-06-2 (interrupted, discovered retroactively 2026-08-07)
+
+**Git commit / project state:** same code as 2026-08-06-1 — this was a
+rerun of that exact command, not a new config.
+
+**Command:** identical to 2026-08-06-1
+(`--init-from hover_stabilize_ppo_seed0.zip --timesteps 300000 --seed 0`),
+attempted between the two runs described under 2026-08-06-1's follow-up
+note above.
+
+**Discovery method:** not observed live — reconstructed 2026-08-07 by
+loading all four `tb_logs/waypoint_logs/PPO_0/` event files and comparing
+step ranges and wall-clock timestamps. This run's event file
+(`events.out.tfevents.1786012343...`) starts immediately after the first
+full run ends and stops at cumulative step 692,224 — roughly 188k of the
+intended ~300k fine-tuning steps — then a fresh event file for the second
+full run begins ~78s later.
+
+**Results (partial, final logged point before stopping)**
+- `ep_rew_mean`: -284.59 at step 692,224
+- Never reached a `model.save()` call (process was interrupted/stopped
+  before completing `--timesteps 300000`), so this run did not itself
+  overwrite the saved checkpoint — the second full run's completion is
+  what determined the final `waypoint_nav_ppo_seed0.zip` contents.
+
+**Verdict**
+- [x] Inconclusive — not a deliberate experiment, a reconstructed
+  data-integrity finding. No config lesson to draw from the numbers
+  themselves; the lesson is procedural (see Notes).
+
+**Notes / what to try next:**
+- This is the run that made "which checkpoint is actually on disk"
+  genuinely ambiguous for a period — see `docs/status.md`'s "Model / log
+  directory layout" section for the fix (timestamped archiving in
+  `waypoint_train.py`, added 2026-08-08).
+
+### Run 2026-08-08-0 — entropy-runaway fix (gamma/ent_coef) + waypoint_bonus
+
+**Git commit / project state:** `config.py` gained `waypoint_ppo_config()`
+(waypoint-specific `PPOConfig`, does not affect hover);
+`WaypointTaskConfig.waypoint_bonus` changed 5.0 → 15.0.
+`waypoint_train.py` now explicitly overrides `model.gamma`/
+`model.ent_coef` on the loaded model after `PPO.load()` — required
+because `PPO.load()` otherwise restores hyperparameters from the
+checkpoint file itself and silently ignores whatever `PPOConfig` is
+passed alongside it (see `docs/status.md`'s IMPORTANT caveat). Also adds
+timestamped archiving of every save to `model/model_weights/history/`.
+
+**Command:**
+```
+python -m src.training.waypoint_train --init-from model/model_weights/hover_stabilize_ppo_seed0.zip --timesteps 300000 --seed 0
+```
+
+**Why this run:** diagnosed from `tb_logs` analysis (2026-08-07/08) of
+the 2026-08-06 run(s) above — `train/std` climbed monotonically the
+entire 300k-step run (0.85 → 1.18) instead of converging the way it did
+for hover (0.68–0.85), and `ep_rew_mean` peaked at step ~729,088
+(-274.38) then *declined* for the remaining ~73k steps, ending at -291.25
+— a reversal, not a plateau. `approx_kl` (0.008–0.014), `clip_fraction`
+(0.09–0.16), and `explained_variance` (0.96–0.98) all stayed in healthy
+ranges throughout, ruling out PPO instability or a bad value function —
+pointed specifically at `ent_coef=0.01` (inherited unchanged from
+hover's `PPOConfig`) applying a constant entropy-increasing pull that
+hover's stronger position-error gradient could override but waypoint's
+weaker/more-delayed one (see `gamma` note below) could not.
+
+**Environment config** (`WaypointTaskConfig`)
+- `waypoints` / episode / reset / truncation bounds: unchanged from
+  2026-08-06 runs
+- Reward weights: position=1.0, velocity=0.05 (**unchanged — deliberately
+  not touched this experiment**, see `config.py`'s comment on why),
+  smoothness=0.01, survival=0.01, **waypoint_bonus=15.0 (was 5.0)**,
+  landing_velocity_penalty=0.3
+
+**Model config** (`waypoint_ppo_config()`, NEW — waypoint-specific)
+- `gamma`: **0.995** (was 0.99) — extends the effective credit horizon
+  from ~100 to ~200 steps, since the one-time `waypoint_bonus` was
+  landing at or past the edge of what a 0.99 horizon could meaningfully
+  shape given the ~108-step-per-waypoint pace implied by the episode
+  budget
+- `ent_coef`: **0.003** (was 0.01) — directly weakens the entropy pull
+  identified above
+- All other PPO hyperparameters unchanged (learning_rate 3e-4, n_steps
+  2048, batch_size 64, n_epochs 10, gae_lambda 0.95, clip_range 0.2,
+  net_arch {pi:[64,64], vf:[64,64]})
+- **Critical implementation detail:** since this is an `--init-from` run,
+  `gamma`/`ent_coef` above only take effect because `waypoint_train.py`
+  explicitly sets `model.gamma`/`model.ent_coef` after `PPO.load()` —
+  confirmed via the script's own printed "Overriding warm-started
+  model's hyperparameters" line at the start of the run.
+
+**Results (training)**
+| Metric | Pre-fix run (2026-08-06) | This run |
+|---|---|---|
+| `train/std`, final | 1.17 | **0.8095** |
+| `train/std` trend | climbed 0.85→1.18, never turned back | flat, 0.81–0.89 band throughout |
+| `ep_rew_mean`, final | -291.25 (past its own peak of -274.38) | **-247.63, still climbing at cutoff** |
+| `train/entropy_loss`, final | -6.21 | -4.78 |
+| `train/explained_variance`, final | 0.966 | 0.9696 |
+| `train/approx_kl`, final | 0.0112 | 0.0119 |
+
+**Saved to:** `model/model_weights/waypoint_nav_ppo_seed0.zip`, archived
+copy `model/model_weights/history/waypoint_nav_ppo_seed0_20260808_202404.zip`
+
+**Verdict**
+- [x] New baseline — entropy runaway confirmed fixed
+- `std` no longer climbs; `ep_rew_mean` is still improving (not
+  peaked-and-reversed) at the 300k cutoff — the first waypoint run where
+  "train longer from here" is justified by the curve shape rather than a
+  hopeful guess.
+
+**Notes / what to try next:** see eval results below (Runs 2026-08-08-1
+and -2) before deciding whether to continue training.
+
+### Run 2026-08-08-1 — eval, before stale-obs bugfix (contaminated, do not use)
+
+**Command:**
+```
+python -m src.training.evaluate.waypoint_evaluate --model model/model_weights/waypoint_nav_ppo_seed0.zip --seed 42
+```
+(model from Run 2026-08-08-0)
+
+**Results**
+- Success rate: 0.0% | Mean waypoints reached: 3.05/5 | Crash rate: 0.0%
+  | Mean episode reward: -322.3
+- New "stuck-leg closest approach" diagnostic (added this session to
+  `waypoint_evaluate.py`): mean 0.148m, min 0.144m, max 0.150m — **20/20
+  episodes reported getting within `waypoint_reach_radius` (0.15m)
+  without it registering.**
+
+**Verdict**
+- [x] Revert / do not use — diagnostic output contaminated
+- The stuck-leg numbers are internally inconsistent with the same run's
+  own final-position-error data (several episodes ended 1.3–1.46m from
+  target yet reported ~0.148m closest approach on that same leg —
+  impossible if both numbers were real). Root-caused to a stale-`obs` bug
+  in `WaypointGymEnv.step()` — see Run 2026-08-08-2 for the fix and clean
+  re-read. **Do not use this run's stuck-leg numbers for any
+  `waypoint_reach_radius` decision.**
+
+**Notes:** the success-rate/waypoints-reached/crash-rate numbers above
+are NOT affected by this bug (that data path was always correct) — only
+the new per-leg diagnostic was contaminated, and only because it reads
+`info["position_error_norm"]`, which the bug also affected.
+
+### Run 2026-08-08-2 — eval, after stale-obs bugfix (clean)
+
+**Git commit / project state:** `training/gym_wrapper/waypoint_gym_wrapper.py`
+fixed — `step()` now re-derives `obs` after ANY waypoint transition
+(`waypoint_bonus > 0.0`), not only the transition into landing
+(`self._in_landing and waypoint_bonus > 0.0`, the old condition). Root
+cause: on any transition step, `obs` (and therefore that step's reward
+and `info["position_error_norm"]`) was left computed against the
+just-passed target instead of the new one — the exact staleness the
+code's own pre-existing comment already described for the landing-phase
+case specifically, just never generalized to intermediate transitions
+(1→2, 2→3, 3→4) which have the identical issue. **No retraining, no
+checkpoint change** — this is a pure evaluation/observation-correctness
+fix, re-run against the exact same weights as Run 2026-08-08-1.
+
+**Command:** identical to 2026-08-08-1.
+
+**Results**
+- Success rate: 0.0% | Mean waypoints reached: **3.00/5** | Crash rate:
+  0.0% | Mean episode reward: -292.6
+- Failure breakdown: 20/20 timeout, 0/20 ever reached landing phase
+- Stuck-leg closest approach (clean): **mean 0.850m, min 0.184m, max
+  1.390m — 0/20 episodes got within `waypoint_reach_radius` (0.15m) on
+  their stuck leg.**
+
+**Verdict**
+- [x] New baseline — `waypoint_reach_radius` question now genuinely
+  settled
+- No episode came remotely close to the reach radius on its stuck leg.
+  **`waypoint_reach_radius=0.15` is confirmed NOT the bottleneck — do not
+  widen it based on this or any earlier data.**
+
+**Notes / what to try next:**
+- New structural observation, not yet confirmed as a real factor: 10/20
+  episodes stalled at exactly 4/5 waypoints, final pos error clustered
+  0.98–1.47m, consistently on the wp3→wp4 leg — at 1.50m, the longest
+  single leg in the route (others: 1.12m, 1.12m, 1.22m). Could be "needs
+  more training" (consistent with the curve still climbing in
+  2026-08-08-0) or "genuinely harder leg regardless of training progress"
+  — not yet distinguished. Check again after the next training run
+  before acting on it (e.g. before considering re-spacing waypoints).
+- Both prerequisites for "train more" are now met for the first time
+  this task: curve still climbing at cutoff (2026-08-08-0), and the two
+  other candidate explanations (reach radius, stale-obs corruption) ruled
+  out/fixed rather than left open. Planned next run: continue training
+  from the current `waypoint_nav_ppo_seed0.zip` for another few hundred k
+  steps, re-eval with `--seed 42` for direct comparability, and check
+  whether the wp3→wp4 stall resolves.
+- `velocity_penalty_weight` (0.05, unchanged since 2026-08-06) remains a
+  candidate for a future experiment if the wp3→wp4 pattern doesn't
+  resolve with more training — deliberately not touched this session to
+  keep the ent_coef/gamma fix's effect isolated and attributable.
+
+**Follow-up note (2026-08-07):** cross-referencing `tb_logs`' four event
+files against their wall-clock timestamps revealed this "one run"
+description above was incomplete — the exact command shown here was
+actually **run twice**, producing two byte-identical 300k-step curves
+(confirmed reproducible: `--init-from` inherits the loaded checkpoint's
+own RNG state, and PyBullet is deterministic given that state, so
+re-running the identical command from the identical checkpoint
+reproduces the identical trajectory). A third, **interrupted** attempt
+(~188k of the intended 300k steps) happened in between the two — see
+Run 2026-08-06-2 below. Since `waypoint_train.py` saved to a fixed path
+with no run-id at the time, it was only possible to determine after the
+fact (by comparing file mtime against `tb_logs` wall-clock) that the
+*second* full run's weights were what ended up in the saved
+`waypoint_nav_ppo_seed0.zip` — the eval results recorded above are
+consistent with either full run (they're identical), so this doesn't
+invalidate the numbers above, but it means "this run" should be read as
+"the (identical, reproducible) 300k-step curve," not literally one
+`python` invocation. Fixed going forward — see `docs/status.md`'s
+"Model / log directory layout" (2026-08-08): every save now also
+archives a timestamped copy so this ambiguity can't recur.
