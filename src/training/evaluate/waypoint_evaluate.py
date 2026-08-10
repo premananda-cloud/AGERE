@@ -107,12 +107,30 @@ def main():
         help="Seed the first reset for a reproducible eval sequence, same convention as hover_evaluate.py. "
              "See module docstring — strongly recommended for any result you'll compare against a later run."
     )
+    parser.add_argument(
+        "--episode-len-sec", type=float, default=None,
+        help="Override WaypointTaskConfig.episode_len_sec (default 20.0) for THIS eval "
+             "only — no retraining needed, since the policy's per-step behavior doesn't "
+             "change, only when timeout fires. Added 2026-08-09 as a zero-cost test of "
+             "whether the 600-step/20s budget is actually constraining route completion: "
+             "the policy was TRAINED under 20s (so its pace/behavior reflects that "
+             "budget, not necessarily an optimal pace for a longer one), but if "
+             "waypoints-reached improves substantially with a longer eval-time budget, "
+             "that's real evidence budget is a limiting factor and worth fixing properly "
+             "(retrain under the new length). If it barely moves, budget isn't the "
+             "bottleneck — don't retrain under a longer episode expecting this alone to "
+             "help. Try e.g. --episode-len-sec 30 or 40 against the known-good checkpoint."
+    )
     args = parser.parse_args()
     model_path = args.model or str(waypoint_model_path())
 
     config = ProjectConfig(task=WaypointTaskConfig())
     if args.gui:
         config.sim.gui = True
+    if args.episode_len_sec is not None:
+        config.task.episode_len_sec = args.episode_len_sec
+        print(f"Note: overriding episode_len_sec to {args.episode_len_sec}s for this eval "
+              f"(trained under {WaypointTaskConfig().episode_len_sec}s — see --help).\n")
 
     env = WaypointGymEnv(config)
     model = PPO.load(model_path, device="cpu")

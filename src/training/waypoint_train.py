@@ -45,6 +45,20 @@ this happened 2026-08-06/07 (three separate runs all wrote to the same
 waypoint_nav_ppo_seed0.zip; which run's weights ended up on disk could
 only be reconstructed after the fact by cross-referencing tb_logs
 wall-clock timestamps against the file's mtime).
+
+IMPORTANT — ep_rew_mean is not a reliable proxy for waypoints-reached
+past a point (2026-08-09): two separate 300k-step continuations from the
+same 802,816-step checkpoint (one lowering velocity_penalty_weight, one
+reverting it back) BOTH improved ep_rew_mean substantially (-247.6 ->
+-181 to -202) while waypoints-reached on a fixed eval seed got WORSE in
+both cases (3.00/5 -> 1.35-1.75/5). The dense per-step shaping reward
+appears optimizable somewhat independently of the sparse, binary
+waypoint-reach event past a certain point — training reward going up is
+no longer sufficient evidence that the actual task is improving. This is
+why --checkpoint-every exists now (see below): without periodic saves, a
+run only gives you a start point and an end point, and you can't tell
+whether/where along the way performance on the real metric peaked before
+the shaped reward kept climbing past it.
 """
 
 import argparse
@@ -53,6 +67,7 @@ from datetime import datetime
 from pathlib import Path
 
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import CheckpointCallback
 
 from src.config import ProjectConfig, WaypointTaskConfig, waypoint_ppo_config
 from src.paths import waypoint_model_path, WAYPOINT_TB_LOG_DIR
@@ -64,6 +79,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--gui", action="store_true", help="Render PyBullet GUI during training")
     parser.add_argument("--timesteps", type=int, default=None, help="Override total_timesteps from config")
+    parser.add_argument(
+        "--checkpoint-every", type=int, default=None,
+        help="Save an intermediate checkpoint every N timesteps during this run, to "
+             "model/model_weights/checkpoints/<name>_<step>_steps.zip. Added 2026-08-09 "
+             "after finding that ep_rew_mean can keep climbing for hundreds of k of "
+             "steps past the point where eval waypoints-reached peaks and starts "
+             "declining (see module docstring's IMPORTANT note) — without this, a long "
+             "run only gives you a start point and an end point, with no way to check "
+             "where in between the real task metric was actually best. Recommend "
+             "something like --checkpoint-every 50000 for any run over ~150k steps, "
+             "then eval each saved checkpoint rather than trusting the final one by "
+             "default."
+    )
     parser.add_argument(
         "--seed", type=int, default=None,
         help="Training seed, passed to SB3's PPO. Only used for a from-scratch run "
@@ -97,6 +125,18 @@ def main():
 
     env = WaypointGymEnv(config)
 
+    callback = None
+    if args.checkpoint_every:
+        checkpoint_dir = Path(waypoint_model_path(args.seed)).parent / "checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        name_prefix = Path(waypoint_model_path(args.seed)).stem
+        callback = CheckpointCallback(
+            save_freq=args.checkpoint_every,
+            save_path=str(checkpoint_dir),
+            name_prefix=name_prefix,
+        )
+        print(f"Checkpointing every {args.checkpoint_every} steps to {checkpoint_dir}/{name_prefix}_<step>_steps.zip")
+
     if args.init_from:
         if args.seed is not None:
             print(f"Note: --seed {args.seed} is ignored for training when warm-starting via --init-from "
@@ -119,11 +159,11 @@ def main():
         # PPO's internal counters from where the loaded checkpoint left off,
         # rather than restarting at step 0 and overwriting/confusing the
         # existing training curve.
-        model.learn(total_timesteps=config.ppo.total_timesteps, reset_num_timesteps=False)
+        model.learn(total_timesteps=config.ppo.total_timesteps, reset_num_timesteps=False, callback=callback)
     else:
         # Note: build_ppo() wraps env in Monitor internally — don't double-wrap here.
         model = build_ppo(env, config.ppo, tensorboard_log=str(WAYPOINT_TB_LOG_DIR), seed=args.seed)
-        model.learn(total_timesteps=config.ppo.total_timesteps)
+        model.learn(total_timesteps=config.ppo.total_timesteps, callback=callback)
 
     # Standard location: model/model_weights/waypoint_nav_ppo[_seedN].zip
     # (see src/paths.py) — not the working directory.

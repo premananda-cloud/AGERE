@@ -405,6 +405,27 @@ reviewed, see notes)**
   waypoints reached` climbs — don't touch reward weights until that's
   been tried, per the plan in `docs/decisions/devlog/2026_08_06.md`.
 
+**Follow-up note (2026-08-07):** cross-referencing `tb_logs`' four event
+files against their wall-clock timestamps revealed this "one run"
+description above was incomplete — the exact command shown here was
+actually **run twice**, producing two byte-identical 300k-step curves
+(confirmed reproducible: `--init-from` inherits the loaded checkpoint's
+own RNG state, and PyBullet is deterministic given that state, so
+re-running the identical command from the identical checkpoint
+reproduces the identical trajectory). A third, **interrupted** attempt
+(~188k of the intended 300k steps) happened in between the two — see
+Run 2026-08-06-2 below. Since `waypoint_train.py` saved to a fixed path
+with no run-id at the time, it was only possible to determine after the
+fact (by comparing file mtime against `tb_logs` wall-clock) that the
+*second* full run's weights were what ended up in the saved
+`waypoint_nav_ppo_seed0.zip` — the eval results recorded above are
+consistent with either full run (they're identical), so this doesn't
+invalidate the numbers above, but it means "this run" should be read as
+"the (identical, reproducible) 300k-step curve," not literally one
+`python` invocation. Fixed going forward — see `docs/status.md`'s
+"Model / log directory layout" (2026-08-08): every save now also
+archives a timestamped copy so this ambiguity can't recur.
+
 ### Run 2026-08-06-2 (interrupted, discovered retroactively 2026-08-07)
 
 **Git commit / project state:** same code as 2026-08-06-1 — this was a
@@ -603,23 +624,192 @@ fix, re-run against the exact same weights as Run 2026-08-08-1.
   resolve with more training — deliberately not touched this session to
   keep the ent_coef/gamma fix's effect isolated and attributable.
 
-**Follow-up note (2026-08-07):** cross-referencing `tb_logs`' four event
-files against their wall-clock timestamps revealed this "one run"
-description above was incomplete — the exact command shown here was
-actually **run twice**, producing two byte-identical 300k-step curves
-(confirmed reproducible: `--init-from` inherits the loaded checkpoint's
-own RNG state, and PyBullet is deterministic given that state, so
-re-running the identical command from the identical checkpoint
-reproduces the identical trajectory). A third, **interrupted** attempt
-(~188k of the intended 300k steps) happened in between the two — see
-Run 2026-08-06-2 below. Since `waypoint_train.py` saved to a fixed path
-with no run-id at the time, it was only possible to determine after the
-fact (by comparing file mtime against `tb_logs` wall-clock) that the
-*second* full run's weights were what ended up in the saved
-`waypoint_nav_ppo_seed0.zip` — the eval results recorded above are
-consistent with either full run (they're identical), so this doesn't
-invalidate the numbers above, but it means "this run" should be read as
-"the (identical, reproducible) 300k-step curve," not literally one
-`python` invocation. Fixed going forward — see `docs/status.md`'s
-"Model / log directory layout" (2026-08-08): every save now also
-archives a timestamped copy so this ambiguity can't recur.
+### Run 2026-08-08-3 — velocity_penalty_weight lowered 0.05→0.02 (regression, reverted)
+
+**Git commit / project state:** `WaypointTaskConfig.velocity_penalty_weight`
+changed 0.05 → 0.02, all other config unchanged from Run 2026-08-08-2's
+checkpoint (802,816 steps).
+
+**Command:**
+```
+python -m src.training.waypoint_train --init-from model/model_weights/waypoint_nav_ppo_seed0.zip --timesteps 300000 --seed 0
+```
+
+**Why:** hypothesis going in — the velocity penalty was suppressing
+commitment to travel across 1-1.5m waypoint gaps, since it applies every
+step regardless of how far from target the drone is.
+
+**Results (training)**
+| Metric | Final value |
+|---|---|
+| `ep_rew_mean` | -185.99 (recovered from a -284.62 dip, still near its own peak — healthy curve, not unstable) |
+| `train/std` | 0.803 (flat 0.80–0.83 throughout — entropy fix still holding) |
+| `explained_variance` | 0.945 |
+
+**Results (eval, `--seed 42`)**
+- Mean waypoints reached: **1.35/5** (down from 3.00/5)
+- Mean reward: -202.0 (better, but NOT comparable to the 0.05-scale
+  baseline — lower velocity_penalty_weight directly lowers every step's
+  cost regardless of task performance)
+- Stuck-leg closest approach: mean 0.271m (down from 0.850m) — episodes
+  stalled MUCH closer to target on average, but still failed to durably
+  enter the 0.15m radius, mostly on early/short legs
+
+**Verdict**
+- [x] Revert — hypothesis was backwards
+- Training curve was healthy (ruling out "needed more steps to adapt" as
+  the explanation). The stuck-leg data shows why it regressed anyway:
+  the penalty's real job wasn't suppressing travel commitment, it was
+  forcing deceleration/stabilization precisely at each target. Removing
+  it made the drone faster but less precise, and precision near-target
+  mattered more for completion than travel speed did. **Reverted to
+  0.05.** Do not re-lower without new evidence pointing the other way.
+
+**Notes:** this is a genuine, repeatable finding (theory tested,
+falsified, reverted with the mechanism understood) — not a wasted run.
+
+### Run 2026-08-09-0 — checkpoint sweep, 802,816-step checkpoint confirmed as local optimum
+
+**Git commit / project state:** config reverted to Run 2026-08-08-2's
+state (`velocity_penalty_weight=0.05`). `waypoint_train.py` gained
+`--checkpoint-every` this session (saves intermediate checkpoints via
+SB3's `CheckpointCallback`, not just the final one).
+
+**Command:**
+```
+cp model/model_weights/history/waypoint_nav_ppo_seed0_20260808_202404.zip model/model_weights/waypoint_nav_ppo_seed0.zip
+python -m src.training.waypoint_train --init-from model/model_weights/waypoint_nav_ppo_seed0.zip --timesteps 300000 --seed 0 --checkpoint-every 50000
+```
+
+**Why:** two separate 300k-step continuations from the 802,816-step
+checkpoint (this run's predecessor and Run 2026-08-08-3) had both
+regressed waypoints-reached despite improving `ep_rew_mean` — needed to
+know whether that was consistent across the whole run or just an
+artifact of looking only at the endpoint.
+
+**Results (eval, `--seed 42`, each of the 6 checkpoints saved during the run)**
+| Cumulative steps | Waypoints reached |
+|---|---|
+| 852,816 | 2.15 |
+| 902,816 | 1.90 |
+| 952,816 | 1.75 |
+| 1,002,816 | 1.45 |
+| 1,052,816 | 2.15 |
+| 1,102,816 | 1.40 |
+
+(802,816 baseline for reference: 3.00)
+
+**Verdict**
+- [x] New baseline confirmed — DO NOT train further from a later
+  checkpoint without a structural change first
+- Every single post-baseline checkpoint is worse than 802,816, across
+  the entire 300k-step span — not a single peak-then-decline, more a
+  step down into a noisy lower band (1,052,816 partially recovers before
+  dropping again) that never returns to 3.00. Combined with Run
+  2026-08-08-3 (also worse, different reward config), three separate
+  continuations from the same baseline have now all regressed. "Just
+  train longer" is closed off as a strategy for the current reward
+  shape. `waypoint_nav_ppo_seed0.zip` restored to the 802,816-step
+  baseline after this sweep.
+
+**Notes / what to try next:** a structurally different lever is needed,
+not another continuation or magnitude tweak — see Run 2026-08-09-2.
+
+### Run 2026-08-09-1 — seed robustness check + episode-length test (both free, no training)
+
+**Git commit / project state:** `waypoint_evaluate.py` gained
+`--episode-len-sec` this session (overrides `episode_len_sec` for eval
+only, no retraining — tests whether budget is the constraint at zero
+training cost, since the policy's per-step behavior doesn't change,
+only when timeout fires).
+
+**Commands:**
+```
+for s in 42 7 100 123; do
+  python -m src.training.evaluate.waypoint_evaluate --model model/model_weights/waypoint_nav_ppo_seed0.zip --seed $s
+done
+python -m src.training.evaluate.waypoint_evaluate --model model/model_weights/waypoint_nav_ppo_seed0.zip --seed 42 --episode-len-sec 30
+python -m src.training.evaluate.waypoint_evaluate --model model/model_weights/waypoint_nav_ppo_seed0.zip --seed 42 --episode-len-sec 40
+```
+(802,816-step baseline checkpoint for all of the above)
+
+**Results — seed robustness**
+| Seed | Waypoints reached |
+|---|---|
+| 42 | 3.00 |
+| 7 | 3.00 |
+| 100 | 2.95 |
+| 123 | 2.70 |
+
+**Results — episode length**
+| Episode length | Waypoints reached |
+|---|---|
+| 20s (trained) | 3.00 |
+| 30s | 2.80 |
+| 40s | 2.75 |
+
+**Verdict**
+- [x] New baseline — 3.00/5 confirmed robust (not a lucky eval-seed
+  draw); budget confirmed NOT the bottleneck
+- Seed sweep: tight 2.70–3.00 range across 4 seeds — real, stable
+  property of the checkpoint. Episode-length sweep: no improvement with
+  more time, if anything slightly worse. At 40s several episodes still
+  showed 4/5 waypoints with 1.3–1.5m final error — no further progress
+  even with 20 extra seconds, meaning the policy is genuinely stuck on
+  that leg, not merely out of time. Don't extend `episode_len_sec`
+  expecting this alone to help.
+
+### Run 2026-08-09-2 — potential-based progress shaping (written + reviewed, not yet run)
+
+**Git commit / project state:** `WaypointTaskConfig.progress_shaping_weight`
+added (10.0). `WaypointGymEnv.step()`/`_progress_reward()` implements
+Ng-Harada-Russell-style potential-based shaping: reward gains
+`progress_shaping_weight * (distance closed this step)`, positive for
+closing distance to the current target, negative for moving away.
+Disabled during `self._in_landing` (see below).
+
+**Why:** three magnitude-tweak levers (ent_coef/gamma — kept,
+velocity_penalty — reverted, waypoint_bonus — kept but unbundled
+priority lowered) and one budget test (ruled out) exhausted without
+recovering past the 802,816-step baseline. The existing per-step penalty
+(`position_error_weight * distance`) penalizes absolute distance every
+step but never directly rewards CLOSING it — consistent with the
+observed pattern of `ep_rew_mean` improving while waypoints-reached got
+worse (Runs 2026-08-08-3, 2026-08-09-0). This term directly targets that
+gap instead of another weight guess.
+
+**Review before running (2026-08-09):**
+- Cliff-avoidance at waypoint transitions verified correct: both sides
+  of the per-step delta are measured against the same pre-transition
+  target; the cached baseline for the *next* step uses the
+  post-transition distance. First-step-after-reset seeded with the
+  actual starting distance (no spurious full-route-length jump).
+- **Bug caught before any run used it:** a magnitude check found this
+  term roughly comparable to, not clearly dominated by,
+  `landing_velocity_penalty_weight`'s safety penalty at unsafe descent
+  speeds (~+0.33/step vs. ~-0.3/step at 1.0 m/s, well above
+  `landing_max_velocity=0.15`) — a real bias toward rushing the
+  touchdown. `velocity_penalty_weight` already gets swapped for a
+  heavier landing-specific value once `_in_landing`; this term wasn't
+  given the same treatment when first written. Since no episode has ever
+  reached the landing phase, there was no prior run to catch this.
+  **Fixed** by returning 0.0 from `_progress_reward()` while
+  `self._in_landing` — a design correction, not an observed failure.
+- Minor/cosmetic: the implementation omits the `γ` discount on the next
+  state's potential that strict Ng et al. shaping requires
+  (`F=γΦ(s')-Φ(s)`, implemented here as `Φ(s')-Φ(s)`). Negligible at
+  `gamma=0.995`, not worth blocking on, but not the exact textbook
+  policy-invariance guarantee if anyone checks.
+
+**Verdict**
+- [ ] Not yet run — first task for 2026-08-10
+
+**Notes / what to try next:** run from the restored 802,816-step
+baseline with `--checkpoint-every 50000` from the start this time (not
+added after the fact). Sweep all 6 checkpoints against `--seed 42`
+rather than trusting the final one, given Run 2026-08-09-0's finding.
+Watch specifically: (1) whether any episode finally reaches the landing
+phase — new information this task has never produced; (2) if one does,
+whether `hard_landing` stays at 0%, confirming the landing-phase
+exclusion fix was worth making; (3) `train/std` stays flat, confirming
+this doesn't reopen the entropy-runaway issue from Run 2026-08-06-1.

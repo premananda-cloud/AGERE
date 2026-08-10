@@ -52,6 +52,24 @@ per episode) wrong observation/reward on every intermediate transition;
 not expected to be a major factor in the low route-completion rate, but
 worth being aware of if re-evaluating older checkpoints trained before
 this fix.
+
+ADDED 2026-08-09 — potential-based progress shaping: after the
+entropy-runaway fix, the best checkpoint found (802,816 cumulative steps,
+3.00/5 waypoints on a fixed eval seed) turned out to be a local best —
+every subsequent training attempt made it worse, almost immediately,
+regardless of which reward-weight lever was tried (velocity penalty both
+lowered and reverted). Diagnosis: the existing per-step penalty punishes
+absolute distance but never directly rewards closing it, so a policy can
+lower cumulative penalty via a "reasonably positioned but unhurried"
+trajectory rather than committing to route completion. Added a
+potential-based shaping term (Ng, Harada & Russell 1999) that rewards
+distance closed each step, with careful handling of the reward cliff
+that would otherwise occur at the exact step a waypoint is reached (see
+_progress_reward()'s docstring). See config.py's
+WaypointTaskConfig.progress_shaping_weight for full reasoning and the
+weight-magnitude estimate. This is a bigger, less-tested change than
+anything applied so far — the 802,816-step checkpoint remains archived
+as a fallback if this doesn't pan out.
 """
 
 import numpy as np
@@ -95,6 +113,12 @@ class WaypointGymEnv(gym.Env):
         self._in_landing = False
         self._landing_hold_steps = 0     # consecutive steps meeting the
                                           # soft-landing condition
+
+        # ADDED 2026-08-09: distance to the current target as of the end
+        # of the previous step, used by the potential-based progress
+        # shaping term in step(). Set properly in reset(); the value
+        # here is just a placeholder before the first reset() call.
+        self._prev_dist_to_target = 0.0
 
     # ------------------------------------------------------------------
     def _landing_target(self) -> np.ndarray:
@@ -141,6 +165,55 @@ class WaypointGymEnv(gym.Env):
             self._in_landing = True
             self._landing_hold_steps = 0
         return self.task.waypoint_bonus
+
+    def _progress_reward(self, dist_to_target_this_step: float) -> float:
+        """ADDED 2026-08-09 — potential-based progress shaping. See
+        config.py's WaypointTaskConfig.progress_shaping_weight docstring
+        for the full reasoning.
+
+        Returns progress_shaping_weight * (distance closed this step),
+        i.e. positive if the drone got closer to its CURRENT target since
+        the last step, negative if it moved away, ~zero once in landing
+        (see below).
+
+        CRITICAL: dist_to_target_this_step must be measured against the
+        SAME target as self._prev_dist_to_target (both relative to
+        whatever target was active at the START of this step), NOT a
+        target that was just switched to mid-step. Call this BEFORE
+        _advance_waypoint_if_reached() has caused any target switch to
+        take effect in the caller's understanding of "current target" —
+        in practice, call it with the pos_error_norm from the ORIGINAL
+        (pre-transition-recompute) obs. Using a post-transition distance
+        here would create a reward cliff at the exact moment a waypoint
+        is reached (large negative spike from "very close to old target"
+        to "far from new target"), punishing success instead of ignoring
+        it — the discrete waypoint_bonus is what's supposed to reward
+        that event, not this term.
+
+        DISABLED DURING LANDING (added 2026-08-09, same session): a
+        magnitude check found this term is roughly comparable in size to
+        landing_velocity_penalty_weight's safety penalty at unsafe
+        descent speeds, not clearly dominated by it — at 1.0 m/s descent
+        (well above landing_max_velocity=0.15), progress reward is
+        ~+0.33/step against a velocity penalty of ~-0.3/step, a net
+        +0.03/step bias toward descending faster than the safety limit
+        allows. velocity_penalty_weight already gets swapped for a
+        heavier landing-specific value once self._in_landing — this term
+        wasn't given the same phase-aware treatment when first added.
+        Since no episode has reached the landing phase in any run so
+        far, there's no empirical track record to catch this kind of
+        bias if it exists; zeroing it out here removes the risk before
+        it's ever exercised, rather than finding out during the first
+        run that actually reaches landing. The landing phase already has
+        purpose-built machinery for a controlled descent (the heavier
+        velocity penalty, the hold-timer, the hard_landing failure mode)
+        — this term's job (encouraging commitment across long route
+        legs) doesn't meaningfully apply to a ~0.45m final descent
+        anyway.
+        """
+        if self._in_landing:
+            return 0.0
+        return self.task.progress_shaping_weight * (self._prev_dist_to_target - dist_to_target_this_step)
 
     def _compute_reward(self, obs: np.ndarray, action: np.ndarray, waypoint_bonus: float) -> float:
         pos_error_norm = float(np.linalg.norm(obs[0:3]))
@@ -239,6 +312,11 @@ class WaypointGymEnv(gym.Env):
         self._landing_hold_steps = 0
 
         obs = self._obs_from_state(state)
+        # ADDED 2026-08-09: seed the progress-shaping baseline with the
+        # starting distance, so the very first step's delta reflects real
+        # progress made rather than a spurious jump from 0.
+        self._prev_dist_to_target = float(np.linalg.norm(obs[0:3]))
+
         info = {
             "start_position": start_position.copy(),
             "start_yaw_rad": float(start_yaw),
@@ -250,6 +328,16 @@ class WaypointGymEnv(gym.Env):
         state = self.sim.apply_action(command)
 
         obs = self._obs_from_state(state)
+
+        # ADDED 2026-08-09: progress shaping computed from THIS obs
+        # (relative to whatever target was active at the START of this
+        # step) BEFORE any waypoint transition below can switch the
+        # target — see _progress_reward()'s docstring for why computing
+        # this against a post-transition target would create a reward
+        # cliff at the exact moment of success.
+        dist_this_step = float(np.linalg.norm(obs[0:3]))
+        progress_reward = self._progress_reward(dist_this_step)
+
         waypoint_bonus = self._advance_waypoint_if_reached(obs)
         # BUGFIX 2026-08-08: re-derive obs on ANY waypoint transition, not
         # just the transition into landing. pos_error in obs above was
@@ -265,7 +353,16 @@ class WaypointGymEnv(gym.Env):
         if waypoint_bonus > 0.0:
             obs = self._obs_from_state(state)
 
-        reward = self._compute_reward(obs, action, waypoint_bonus)
+        reward = self._compute_reward(obs, action, waypoint_bonus) + progress_reward
+
+        # ADDED 2026-08-09: cache THIS step's distance to whatever target
+        # is current NOW (post-transition if one happened) as the
+        # baseline for next step's progress delta. Using the
+        # (possibly-recomputed) obs here, not dist_this_step, is
+        # deliberate — next step's target is the new one if a transition
+        # just happened, and next step's delta needs a same-target
+        # baseline to compare against.
+        self._prev_dist_to_target = float(np.linalg.norm(obs[0:3]))
 
         self._step_count += 1
 
@@ -278,6 +375,7 @@ class WaypointGymEnv(gym.Env):
             "position_error_norm": float(np.linalg.norm(obs[0:3])),
             "waypoints_reached": min(self._waypoint_idx, len(self._waypoints)),
             "success": success,
+            "progress_reward": progress_reward,
         }
         if truncated:
             info["truncation_reason"] = reason

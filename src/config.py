@@ -95,27 +95,24 @@ class WaypointTaskConfig:
 
     # Reward shaping weights — same pattern as hover, plus one new term.
     #
-    # CHANGED 2026-08-08 (second pass, was 0.05, same as hover): lowered
-    # to test the pacing hypothesis directly via a training run rather
-    # than via instrumentation first. Reasoning: at position_error_weight
-    # =1.0 dominating the per-step reward while far from target, even a
-    # moderate 1-2 m/s cruise speed cost -0.05 to -0.1/step under the old
-    # weight — non-trivial relative to the position term on a 1-1.5m
-    # approach. Lowering to 0.02 cuts that cost by 60%, giving the policy
-    # more room to prefer committing to speed over a slow, cautious
-    # approach, while the landing phase's own separate, heavier
-    # landing_velocity_penalty_weight (0.3, unchanged) still discourages
-    # a fast/unsafe touchdown once _in_landing.
-    #
-    # NOTE: this is a THIRD lever stacked onto the same experiment as the
-    # ent_coef/gamma fix and the waypoint_bonus increase (see
-    # waypoint_ppo_config() and the note below) — if this run's result is
-    # ambiguous, the next step should isolate this change alone, starting
-    # fresh from the entropy-fixed-but-pre-this-change checkpoint
-    # (archived under model/model_weights/history/), not stack a fourth
-    # change on top.
+    # velocity_penalty_weight: TRIED 0.02 (2026-08-08, second pass),
+    # REVERTED back to 0.05. Hypothesis going in: the penalty was
+    # suppressing commitment to travel across 1-1.5m waypoint gaps.
+    # Result: mean waypoints reached DROPPED (3.00/5 -> 1.35/5). tb_logs
+    # showed a healthy, normally-adapting training curve (std flat,
+    # ep_rew_mean recovering-then-climbing, no instability) — ruling out
+    # "just needed more steps to adapt" as the explanation. The stuck-leg
+    # diagnostic showed why: with the lower penalty, episodes stalled
+    # much CLOSER to target on average (0.271m vs 0.850m) but still
+    # failed to durably enter the 0.15m reach radius, mostly on the
+    # early/short legs rather than the long ones. Read: the penalty's
+    # real job wasn't suppressing travel commitment, it was forcing
+    # deceleration/stabilization precisely at each target — removing it
+    # made the drone faster but less precise, and precision near-target
+    # mattered more for completion than travel speed did. Do not
+    # re-lower this without new evidence pointing the other way.
     position_error_weight: float = 1.0
-    velocity_penalty_weight: float = 0.02
+    velocity_penalty_weight: float = 0.05
     action_smoothness_weight: float = 0.01
     survival_bonus: float = 0.01
 
@@ -137,6 +134,71 @@ class WaypointTaskConfig:
     landing_velocity_penalty_weight: float = 0.3   # only active during landing phase — much
                                                      # heavier than the general velocity penalty,
                                                      # specifically to punish crashing into the ground fast
+
+    # ADDED 2026-08-09 — potential-based progress shaping (bigger swing,
+    # per-checkpoint decision to try after the 802,816-step checkpoint
+    # (3.00/5, archived) turned out to be a local best that every
+    # subsequent training attempt made worse, immediately, regardless of
+    # which of the smaller reward-weight levers was tried. Diagnosis: the
+    # existing per-step penalty (position_error_weight * distance)
+    # penalizes absolute distance every step but never directly rewards
+    # CLOSING distance — a policy can lower its cumulative penalty by
+    # settling into a "reasonably positioned" trajectory without urgency,
+    # which is consistent with what was observed (ep_rew_mean improving
+    # while waypoints-reached got worse).
+    #
+    # progress_shaping_weight scales a potential-based shaping term added
+    # in WaypointGymEnv.step() (Ng, Harada & Russell 1999): the reward
+    # gains +progress_shaping_weight * (distance_closed_this_step). This
+    # is positive when the drone got closer to its current target this
+    # step, negative when it moved away, ~zero when holding still — a
+    # direct, correctly-scaled urgency signal that the raw distance
+    # penalty doesn't provide. Potential-based shaping of this form is
+    # proven not to change what the OPTIMAL policy is (unlike ad-hoc
+    # shaping, which can introduce exploitable side incentives) — it only
+    # changes how fast a learner finds it. See waypoint_gym_wrapper.py's
+    # step() for the implementation, including the target-switch-cliff
+    # handling this needs (naively computing the potential against a
+    # NEW target on the exact step a waypoint is reached would punish
+    # the moment of success — handled by keeping both sides of the delta
+    # relative to the same target the step started with).
+    #
+    # Weight reasoning: at a plausible ~1-2 m/s cruise, distance closed
+    # per step (30Hz) is roughly 0.03-0.07m. At weight 1.0 that's a
+    # reward contribution of ~0.03-0.07/step — negligible next to
+    # position_error_weight=1.0's typical ~0.3-1.0/step penalty while far
+    # from target, i.e. too weak to change behavior. Set to 10.0 so a
+    # typical cruise contributes roughly +0.3-0.7/step, comparable in
+    # scale to the static penalty it's meant to counteract. This is the
+    # single most uncertain new number here — worth a short/GUI sanity
+    # check before committing to a full training run, and the first
+    # thing to retune if the resulting behavior looks wrong (e.g. reckless
+    # straight-line rushing that ignores precision, which would show up
+    # as MORE crashes than the 0% seen in every run so far).
+    #
+    # LANDING PHASE EXCLUSION (added 2026-08-09, same session, before any
+    # training run used this weight): this term is DISABLED during the
+    # landing phase (self._in_landing) in waypoint_gym_wrapper.py — see
+    # _progress_reward()'s docstring there for the magnitude check that
+    # motivated it. At realistic unsafe descent speeds (~1 m/s), this
+    # term's pull (~+0.33/step) is comparable to, not clearly dominated
+    # by, landing_velocity_penalty_weight's safety penalty (~-0.3/step)
+    # — a real bias toward rushing the touchdown that velocity_penalty_
+    # weight's existing landing-phase swap doesn't cover, since this term
+    # wasn't given the same phase-aware treatment when first written.
+    # Caught before any run ever reached the landing phase, so this is a
+    # design correction, not an observed failure.
+    #
+    # Simplification note: strict Ng et al. potential-based shaping
+    # multiplies the future term by the learner's discount factor gamma
+    # (F = gamma*Phi(s') - Phi(s)). This implementation uses the
+    # undiscounted difference instead (gamma implicitly 1) for
+    # simplicity — waypoint_ppo_config()'s gamma=0.995 is close enough to
+    # 1 that the exact optimality-preservation guarantee's violation is
+    # negligible, and threading the PPO-level gamma into the environment
+    # (which doesn't otherwise know about it) isn't worth the coupling
+    # for a demo-scoped project.
+    progress_shaping_weight: float = 10.0
 
 
 @dataclass
