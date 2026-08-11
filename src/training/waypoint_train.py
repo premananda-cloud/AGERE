@@ -73,6 +73,7 @@ from src.config import ProjectConfig, WaypointTaskConfig, waypoint_ppo_config
 from src.paths import waypoint_model_path, WAYPOINT_TB_LOG_DIR
 from src.training.gym_wrapper.waypoint_gym_wrapper import WaypointGymEnv
 from src.policies.ppo_policy import build_ppo
+from src.model_registry import record_run
 
 
 def main():
@@ -170,6 +171,24 @@ def main():
     save_path = Path(waypoint_model_path(args.seed))
     model.save(str(save_path))
     print(f"\nSaved model to {save_path}")
+
+    # Registry: log this file's identity (by content hash, not path -- the
+    # path above is a mutable pointer that the NEXT run will overwrite) along
+    # with what produced it. This is what makes "which checkpoint got 3.00/5"
+    # a lookup instead of a forensic reconstruction from devlog prose and file
+    # mtimes (see 2026-08-09 incident). Tag evals against this same hash via
+    # waypoint_evaluate.py to close the loop.
+    run_hash = record_run(
+        saved_path=save_path,
+        init_from=args.init_from,
+        run_timesteps=config.ppo.total_timesteps,
+        cumulative_timesteps=model.num_timesteps,
+        seed=args.seed,
+        task_config=config.task,
+        ppo_config=config.ppo,
+    )
+    print(f"Registered in model registry: hash {run_hash[:12]}... "
+          f"(cumulative_timesteps={model.num_timesteps})")
 
     # Archiving: always keep a timestamped copy alongside the standard
     # save path, so a rerun against the same --seed (intentional restart,

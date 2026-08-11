@@ -445,3 +445,4 @@ nothing about this change reopens the entropy-runaway issue.
    decision to waypoint nav
 7. `docs/devlog/2026_07_30.md` — the AGERE/AGERE_sims split decision
 8. `docs/architecture/Architecture.md` — long-term system architecture (PX4/ROS2)
+Weghts and logs backed up to huging face
