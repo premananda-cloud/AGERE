@@ -202,6 +202,98 @@ class WaypointTaskConfig:
 
 
 @dataclass
+class PrecisionFlightTaskConfig:
+    """RL task definition for the takeoff -> hover -> land cycle, trained
+    end-to-end as ONE episode/ONE policy (added 2026-08-11, after pausing
+    waypoint nav -- see docs/decisions/devlog/2026_08_11.md for why).
+
+    Design intent, following that devlog's "instinctive vs. command layer"
+    discussion: the policy only ever chases whatever target it's given each
+    step (same interface as HoverGymEnv) -- what's new here is that the
+    target itself moves through three phases within a single episode,
+    switched by simple deterministic rules (altitude threshold, elapsed
+    time, altitude+velocity threshold) rather than anything learned. This
+    is intentionally the "option 1" supervisor from that discussion:
+    fixed mission logic is sufficient for takeoff/hover/land, no LLM or
+    separate planner needed. See waypoint_gym_wrapper.py's docstring
+    conventions -- this task follows the same phase-tracking pattern
+    WaypointTaskConfig established for its landing phase, generalized to
+    cover takeoff too.
+
+    "Extreme precision" here means tighter reward shaping around the hover
+    target than HoverTaskConfig's defaults (position_error_weight raised,
+    plus a dedicated precision-zone bonus) -- NOT yet validated against
+    an actual training run. Treat these numbers as a first-pass starting
+    point, the same way WaypointTaskConfig's early weights were before
+    tb_logs analysis corrected them (see config.py's WaypointTaskConfig
+    section for that whole history) -- expect to retune once real training
+    data exists.
+    """
+
+    ground_position: tuple = (0.0, 0.0, 0.05)   # meters -- matches hover_takeoff_land_demo.py's GROUND_Z
+    hover_target: tuple = (0.0, 0.0, 1.0)        # meters -- same point HoverTaskConfig defaults to
+
+    # Phase-transition thresholds -- deterministic rules, the "option 1"
+    # supervisor. See WaypointGymEnv's landing-phase pattern for the
+    # precedent this follows.
+    takeoff_arrival_radius: float = 0.08   # meters -- within this of hover_target ends takeoff phase
+    hover_hold_duration_sec: float = 3.0   # how long to hold station before landing begins
+    landing_target_altitude: float = 0.05  # meters -- near-ground, not exactly 0 (same reasoning as
+                                             # WaypointTaskConfig's field of the same name)
+    landing_max_velocity: float = 0.15     # m/s -- touchdown speed to count as "soft"
+    landing_hold_time_sec: float = 1.5     # must stay down + stable this long to count as success
+
+    episode_len_sec: float = 20.0   # generous: needs to fit takeoff + hover_hold_duration_sec + landing
+                                      # + landing_hold_time_sec with room to spare, not tuned yet
+
+    # Reset randomization -- small jitter around the ground position, NOT
+    # around the hover target (unlike HoverTaskConfig/WaypointTaskConfig)
+    # since every episode now genuinely starts on the ground.
+    reset_position_jitter: float = 0.05
+    reset_yaw_jitter_deg: float = 15.0
+
+    # Truncation bounds -- same scale as HoverTaskConfig's, since the
+    # xy footprint of this task (climb straight up, hold, come straight
+    # down) doesn't need WaypointTaskConfig's wider margins.
+    max_xy_distance: float = 1.5
+    max_altitude: float = 2.0
+    max_tilt_rad: float = 0.4
+
+    # Reward shaping. position_error_weight raised vs. HoverTaskConfig's
+    # 1.0 -- "extreme precision" needs a steeper gradient near the target,
+    # not just a bonus zone. UNTESTED -- if training is unstable (compare
+    # against the entropy-runaway pattern documented in WaypointTaskConfig),
+    # this is the first thing to reconsider.
+    position_error_weight: float = 2.0
+    velocity_penalty_weight: float = 0.05
+    action_smoothness_weight: float = 0.01
+    survival_bonus: float = 0.01
+
+    # Precision bonus -- active only during the hover phase (not takeoff/
+    # landing, where being exactly on-target isn't the point yet). Tighter
+    # radius than WaypointTaskConfig's waypoint_reach_radius (0.15) since
+    # this is meant to reward genuine precision, not just arrival.
+    hover_precision_radius: float = 0.05
+    precision_bonus: float = 0.02   # per-step, while inside hover_precision_radius during hover phase
+
+    # Landing-phase velocity penalty -- same pattern as WaypointTaskConfig:
+    # REPLACES velocity_penalty_weight (not additive) once in the landing
+    # phase, since a hard landing is a much more specific failure to
+    # penalize than general "moving fast."
+    landing_velocity_penalty_weight: float = 0.3
+
+    # Disturbance injection -- active only during the hover phase, using
+    # DroneSim.apply_velocity_kick() (already existed, built for Stage 3's
+    # disturbance criterion -- see drone_sim.py). Direction random per kick,
+    # magnitude uniform in disturbance_kick_range. UNTESTED probability/
+    # magnitude -- if the policy never recovers cleanly, lower
+    # disturbance_kick_range before assuming the whole approach is wrong.
+    disturbance_enabled: bool = True
+    disturbance_prob_per_step: float = 0.01   # ~1 kick per ~3s at 30Hz control rate, expected value
+    disturbance_kick_range: tuple = (0.3, 1.0)   # m/s magnitude, uniform-sampled
+
+
+@dataclass
 class PPOConfig:
     """Hyperparameters passed to stable-baselines3 PPO."""
 
@@ -265,8 +357,10 @@ class ProjectConfig:
     """task defaults to HoverTaskConfig for backward compatibility —
     hover_train.py/hover_evaluate.py/hover_demo.py calling ProjectConfig()
     with no args are unaffected. waypoint_train.py (and its evaluate/demo
-    siblings) explicitly pass task=WaypointTaskConfig() instead."""
+    siblings) explicitly pass task=WaypointTaskConfig() instead.
+    precision_flight_train.py (added 2026-08-11, and its evaluate sibling)
+    explicitly pass task=PrecisionFlightTaskConfig()."""
 
     sim: SimConfig = field(default_factory=SimConfig)
-    task: HoverTaskConfig | WaypointTaskConfig = field(default_factory=HoverTaskConfig)
+    task: HoverTaskConfig | WaypointTaskConfig | PrecisionFlightTaskConfig = field(default_factory=HoverTaskConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
