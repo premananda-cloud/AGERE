@@ -17,20 +17,41 @@ Explicit non-goal: this doc does not argue RL-vs-classical-control in
 general. It states the argument for *this* choice, once, so it can be
 challenged on its own terms rather than re-litigated per stage.
 
-## Stage 0 — Resolve the baseline (blocking, do first)
+## Stage 0 — Resolve the baseline (DONE, 2026-08-16)
 
-Before any curriculum work: four candidate checkpoints exist
-(`hover_stabilize_ppo_seed0/1/2.zip`, `hover_stabilize_ppo.zip`). Do not
-assume the unnumbered file is a seed or a duplicate — hash all four via
-`model_registry`, evaluate each on the existing (undisturbed)
-`hover_evaluate.py` metric, and log the result. Winner becomes "the hover
-champion" and the sole Stage-0 parent for everything below. This is the
-same discipline that caught the waypoint baseline silently regressing on
-2026-08-11 — don't skip it because it feels obvious.
+Original plan assumed picking among 4 pre-existing checkpoints. That changed
+mid-execution: the 4 originals were deliberately retired (`checkpoint_manager.py
+retire-task waypoint_nav` swept them in error initially — a real bug in the
+task-filtering logic, since fixed — then a second, deliberate `rm -rf` on the
+archive folder permanently removed them once the decision was made to train
+hover from scratch instead of resuming from them). Stage 0 became: train one
+fresh baseline, evaluate every intermediate checkpoint (not just the final
+save), pick the real winner.
 
-**Open question:** does `hover_evaluate.py`'s current metric (whatever it
-optimizes today) actually capture "good baseline hover," or does it need a
-second look before being trusted as the Stage-0 selection criterion?
+Result: `hover_stabilize_ppo_seed0`, from-scratch, 500k steps,
+`--checkpoint-every 50000`. Full 11-checkpoint eval table in
+`training-log.md` Run 2026-08-16-0. Champion: the **450,000-step**
+checkpoint (hash `f9153039...`), not the final save — 0.020m mean position
+error, 0% crash rate, beating the 501,760-step final save (0.025m, 5%
+crash) on both axes simultaneously. Promoted to
+`model/model_weights/hover_champion.zip` via `checkpoint_manager.py`.
+
+Notable and still only partially understood: a crash-rate spike at
+250k–350k steps (peaking 80% at 250k) that resolves by 450k, while position
+error over that same window looked good (would have been missed by
+position-error-only monitoring). Working theory (overcorrection via
+elevated action variance) was tested and **refuted** — `train/std` was
+strictly decreasing through the window, opposite of predicted. Mechanism
+remains unexplained; see `theory-log.md` 2026-08-16-0/1. Not blocking —
+noted because the same "good primary metric, bad secondary metric" trap is
+exactly what Stage 1's eval discipline (below) exists to catch going
+forward.
+
+**Open question resolved:** `hover_evaluate.py`'s metric (position error +
+crash rate, checked as separate criteria) was sufficient to select a real
+champion — but only because both were checked. The crash-spike incident is
+a concrete argument for continuing to gate on both, every stage, not
+simplifying to one scalar later for convenience.
 
 ## Disturbance taxonomy
 
@@ -91,7 +112,76 @@ stage's eval comes back flat or regressed relative to expectation. Full
 sweep is reserved for Stage 1 (establishing whether the approach works at
 all) and for any stage that regresses.
 
-## Metrics (define before training, not after)
+## Stage 1 — impulse kicks (design finalized 2026-08-16, not yet built)
+
+**Type chosen: impulse kicks**, via `apply_velocity_kick()` (already exists,
+confirmed kinematic-override mechanism, not physics-solver-timing-dependent
+— see `drone_sim.py` docstring). Chosen over sustained/gusting wind as the
+*first* stage specifically because a single discrete event is easier to
+attribute a crash or recovery to than a continuous force layered on normal
+control noise — isolating one clean mechanism before layering complexity,
+not a claim that kicks are more important long-term than wind.
+
+**Magnitude scale — grounded in the platform's own operating envelope.**
+`drone_sim.py`'s specs (`m=0.027kg`, `max_speed_kmh=30`) match the Crazyflie
+gym-pybullet-drones simulates — 30 km/h ≈ **8.3 m/s**, the platform's own
+top controllable speed. Scaling disturbance against that gives a defensible,
+cited ceiling instead of a guessed absolute number:
+
+| Level | Kick magnitude | % of max speed | Rationale |
+|---|---|---|---|
+| 1 (mild) | 0.1–0.3 m/s | ~2–4% | Barely perceptible; sanity-checks the mechanism |
+| 2 (moderate) | 0.3–0.6 m/s | ~4–7% | Realistic bump/prop-wash from a nearby object |
+| 3 (severe, Stage 1 ceiling) | 0.8–1.2 m/s | ~10–15% | Plausible worst-case indoor collision; beyond this starts to look like a different failure category (structural/actuator), not "recover from a shove" |
+
+**Timing within an episode:** one kick per episode (see sub-stage table
+below for when multi-kick is introduced), landing at a **random step
+between step 60–150** (2–5s into an 8s/240-step episode). Reasoning: too
+early and it's indistinguishable from normal initial-convergence behavior
+(the champion typically settles within the first 1–2s); too late and there's
+not enough episode left to observe recovery before truncation. Randomizing
+within the window (not a fixed step) prevents the policy from learning to
+"brace" at a memorized timestep instead of reacting to the actual event.
+
+**Recovery definition — anchored to existing numbers, not invented fresh.**
+`hover_evaluate.py` already uses **0.2m** as `tail_threshold`, its existing
+boundary for "notably worse than typical." Reusing it here (rather than a
+new disconnected number) keeps Stage 1 comparable to every other hover eval
+already run. Following the same non-momentary-touch principle
+`landing_hold_time_sec` already uses elsewhere in the codebase: **recovered
+= position error back under 0.2m within 60 steps (2s) of the kick, AND
+sustained through episode end** — not just touching 0.2m once and drifting
+back out.
+
+**Mastery gate, applied identically at every sub-stage below:** crash rate
+<10% (matching the existing Stage 2 hover bar) AND recovery rate >90%
+within the 2s/60-step budget. One consistent bar throughout, not a new
+threshold invented per sub-stage.
+
+**Sub-stage progression — cumulative within magnitude, one new variable at
+a time:**
+
+| Sub-stage | Kicks/episode | Magnitude(s) sampled | Episode length | Purpose |
+|---|---|---|---|---|
+| 1a | 1 | Level 1 only | 8s (current) | Establish the mechanism works at all |
+| 1b | 1 | Level 1 + 2 (cumulative, not replace) | 8s | Escalate magnitude without losing 1a competence |
+| 1c | 1 | Level 1 + 2 + 3 | 8s | Full single-kick magnitude range mastered |
+| 1d | 0 (sanity check, no kicks) | n/a | longer (e.g. 16s) | Isolate episode-length as a variable BEFORE adding periodicity — confirms baseline hover quality holds over a longer duration on its own |
+| 1e | 2+, fixed spacing | Level 1+2+3 mix, similar magnitude within an episode | longer | Introduce repeated disturbance as its own new variable, not combined with 1d's length change |
+| 1f | 2+, random spacing/magnitude | Level 1+2+3, randomized per kick | longer | Stage 1's actual finish line |
+
+The 1c→1d split matters specifically because 1d and 1e each change exactly
+one thing relative to the prior row — same discipline as the zero-cost
+`--episode-len-sec` test that ruled out episode budget as waypoint nav's
+bottleneck on 2026-08-09. Skipping 1d (going straight from 1c to periodic
+kicks on a longer episode) would conflate "can't handle a longer episode"
+with "can't handle repeated kicks" if something regresses.
+
+**Per-trial logging** (feeds the metrics section below): kick step(s),
+magnitude(s), crash (y/n), recovered within budget (y/n), and if so,
+recovery time in steps — that last number is what tells whether 1a→1b→1c is
+degrading gracefully or falling off a cliff, not just pass/fail per
+sub-stage.
 
 Reuse waypoint-nav's discipline: numbers per checkpoint, logged, not just
 a final-save eval or a TensorBoard curve glanced at once.
@@ -104,9 +194,12 @@ Per disturbance type, track at minimum:
 - For type 8 specifically: touchdown vertical velocity and horizontal
   drift, since this only matters during landing approach
 
-**Open item:** the recovery-radius X and "crash" definition need concrete
-values before Stage 1 starts — same category of gap as `landing_max_velocity`
-already existing for the landing case.
+**Resolved for Stage 1 (2026-08-16):** recovery radius = 0.2m (reusing
+`hover_evaluate.py`'s existing `tail_threshold`), recovery budget = 60
+steps/2s sustained, not momentary. See Stage 1 section above for the full
+reasoning. Types 1/2/4–9 still need their own recovery-radius/budget
+definitions when their turn comes — 0.2m/2s is not assumed to transfer
+automatically to a different disturbance type without re-justifying it.
 
 ## Registry extension
 
@@ -143,15 +236,23 @@ dump.
 
 ## Plan for next session
 
-1. Resolve Stage 0 (hash + eval the four hover checkpoints, log winner).
-2. Pin down real magnitude numbers for disturbance types 1–3 (the ones
-   most likely to go first), with a cited source per number.
-3. Define the concrete metric thresholds (recovery radius, crash
-   definition) that Stage 1's eval will report against.
-4. Decide Stage 1's disturbance type (recommend #3, impulse kicks — cheapest
-   to implement, already has partial infra via `apply_velocity_kick`) and
-   run the full hyperparameter/policy sweep there, since Stage 1 is where
-   sweep-always is still justified.
-5. Extend `model_registry.py`'s schema per the section above before Stage
-   1's first run, not after — same lesson as `--checkpoint-every` arriving
-   only after flying blind cost a day.
+1. ~~Resolve Stage 0~~ — done 2026-08-16, see above. Champion:
+   `hover_champion.zip` (hash `f9153039...`).
+2. ~~Decide Stage 1's disturbance type and magnitude~~ — done 2026-08-16,
+   see Stage 1 section above.
+3. Build the actual gym-wrapper changes for sub-stage 1a: kick injection
+   (random step 60–150, Level-1 magnitude 0.1–0.3 m/s), recovery tracking
+   (0.2m/60-step sustained), and per-trial logging as specified above.
+   Not yet started — this doc was written specifically to exist before
+   that code does.
+4. Extend `model_registry.py`'s `run` schema for disturbance metadata (type,
+   magnitude range, which prior sub-stages' distributions are included) —
+   still not done, still worth doing before 1a's first training run rather
+   than after, same lesson as `--checkpoint-every` arriving late cost a day
+   on 2026-08-09.
+5. Pin down real magnitude numbers for types 1–2 (wind) — still open,
+   deferred behind Stage 1 (kicks) per the type-choice reasoning above.
+6. Full hyperparameter/policy sweep at sub-stage 1a specifically (per the
+   sweep-on-regression policy: Stage 1's first sub-stage is where
+   sweep-always is still justified, to establish the approach works before
+   defaulting to carry-forward configs).

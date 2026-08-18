@@ -18,6 +18,17 @@ class SimConfig:
     ctrl_freq: int = 30   # How often the sim accepts a new action (Hz);
                            # must evenly divide pyb_freq
     gui: bool = False     # True to render the PyBullet window locally
+    record: bool = False  # True to save video output (added 2026-08-16).
+        # Passed straight through to gym-pybullet-drones' HoverAviary,
+        # which handles this itself: with gui=True, produces a real .mp4
+        # via PyBullet's own p.startStateLogging(STATE_LOGGING_VIDEO_MP4);
+        # with gui=False, saves per-step PNG frames instead (no built-in
+        # mp4 muxing in that mode -- needs ffmpeg to stitch afterward).
+        # CONFIRMED (read gym-pybullet-drones source directly, 2026-08-16):
+        # output always lands in ./results/ relative to the process's cwd
+        # -- HoverAviary never exposes output_folder to its own
+        # constructor, so it can't be redirected from here regardless of
+        # what's passed in DroneSim.
 
 
 @dataclass
@@ -46,6 +57,58 @@ class HoverTaskConfig:
     velocity_penalty_weight: float = 0.05
     action_smoothness_weight: float = 0.01
     survival_bonus: float = 0.01
+
+    # --- Disturbance injection (Stage 1, added 2026-08-16) ---------------
+    # Off by default -- existing hover_train.py/hover_evaluate.py runs with
+    # no flags are byte-for-byte unaffected. See
+    # docs/planning/hover-robustness-curriculum-plan.md "Stage 1" section
+    # for the full reasoning behind every number below; this is the
+    # implementation of that design, not a fresh decision.
+    disturbance_enabled: bool = False
+
+    # How many apply_velocity_kick() events per episode, and where in the
+    # episode (control steps) each is allowed to land. Sub-stage 1a uses
+    # exactly one kick; later sub-stages (1e/1f) raise
+    # disturbance_kicks_per_episode and this generalizes without further
+    # wrapper changes -- see hover_gym_wrapper.py's reset().
+    disturbance_kicks_per_episode: int = 1
+    disturbance_kick_step_min: int = 60    # 2s into an 8s/240-step episode
+    disturbance_kick_step_max: int = 150   # 5s in -- leaves room to observe recovery
+    disturbance_min_kick_spacing_steps: int = 30   # only matters when kicks_per_episode > 1
+
+    # Magnitude range, m/s -- uniform-sampled per kick, direction random.
+    # Grounded in the platform's own max controllable speed (~8.3 m/s, see
+    # plan doc): sub-stage 1a = Level 1 (~2-4% of max speed).
+    disturbance_kick_min_mps: float = 0.1
+    disturbance_kick_max_mps: float = 0.3
+
+    # "Recovered" = position error back under this threshold, sustained for
+    # this many consecutive steps, not just touched once. threshold reuses
+    # hover_evaluate.py's existing tail_threshold (0.2m) rather than a new
+    # disconnected number; hold_steps=60 -> 2s at 30Hz ctrl_freq.
+    recovery_threshold_m: float = 0.2
+    recovery_hold_steps: int = 60
+
+
+# Stage 1 sub-stage presets, per docs/planning/hover-robustness-curriculum-plan.md.
+# Single source of truth for hover_train.py AND hover_evaluate.py -- both import
+# this rather than each keeping their own copy, so training and evaluation can
+# never silently drift onto different disturbance configs for "the same" stage.
+# Only 1a is defined so far -- add 1b/1c/etc. here as each becomes the active
+# sub-stage. Values here must match the plan doc; if they diverge, one of the
+# two is wrong.
+HOVER_STAGE_PRESETS: dict[str, dict] = {
+    "1a": dict(
+        disturbance_enabled=True,
+        disturbance_kicks_per_episode=1,
+        disturbance_kick_step_min=60,
+        disturbance_kick_step_max=150,
+        disturbance_kick_min_mps=0.1,
+        disturbance_kick_max_mps=0.3,
+        recovery_threshold_m=0.2,
+        recovery_hold_steps=60,
+    ),
+}
 
 
 @dataclass
@@ -201,97 +264,6 @@ class WaypointTaskConfig:
     progress_shaping_weight: float = 10.0
 
 
-@dataclass
-class PrecisionFlightTaskConfig:
-    """RL task definition for the takeoff -> hover -> land cycle, trained
-    end-to-end as ONE episode/ONE policy (added 2026-08-11, after pausing
-    waypoint nav -- see docs/decisions/devlog/2026_08_11.md for why).
-
-    Design intent, following that devlog's "instinctive vs. command layer"
-    discussion: the policy only ever chases whatever target it's given each
-    step (same interface as HoverGymEnv) -- what's new here is that the
-    target itself moves through three phases within a single episode,
-    switched by simple deterministic rules (altitude threshold, elapsed
-    time, altitude+velocity threshold) rather than anything learned. This
-    is intentionally the "option 1" supervisor from that discussion:
-    fixed mission logic is sufficient for takeoff/hover/land, no LLM or
-    separate planner needed. See waypoint_gym_wrapper.py's docstring
-    conventions -- this task follows the same phase-tracking pattern
-    WaypointTaskConfig established for its landing phase, generalized to
-    cover takeoff too.
-
-    "Extreme precision" here means tighter reward shaping around the hover
-    target than HoverTaskConfig's defaults (position_error_weight raised,
-    plus a dedicated precision-zone bonus) -- NOT yet validated against
-    an actual training run. Treat these numbers as a first-pass starting
-    point, the same way WaypointTaskConfig's early weights were before
-    tb_logs analysis corrected them (see config.py's WaypointTaskConfig
-    section for that whole history) -- expect to retune once real training
-    data exists.
-    """
-
-    ground_position: tuple = (0.0, 0.0, 0.05)   # meters -- matches hover_takeoff_land_demo.py's GROUND_Z
-    hover_target: tuple = (0.0, 0.0, 1.0)        # meters -- same point HoverTaskConfig defaults to
-
-    # Phase-transition thresholds -- deterministic rules, the "option 1"
-    # supervisor. See WaypointGymEnv's landing-phase pattern for the
-    # precedent this follows.
-    takeoff_arrival_radius: float = 0.08   # meters -- within this of hover_target ends takeoff phase
-    hover_hold_duration_sec: float = 3.0   # how long to hold station before landing begins
-    landing_target_altitude: float = 0.05  # meters -- near-ground, not exactly 0 (same reasoning as
-                                             # WaypointTaskConfig's field of the same name)
-    landing_max_velocity: float = 0.15     # m/s -- touchdown speed to count as "soft"
-    landing_hold_time_sec: float = 1.5     # must stay down + stable this long to count as success
-
-    episode_len_sec: float = 20.0   # generous: needs to fit takeoff + hover_hold_duration_sec + landing
-                                      # + landing_hold_time_sec with room to spare, not tuned yet
-
-    # Reset randomization -- small jitter around the ground position, NOT
-    # around the hover target (unlike HoverTaskConfig/WaypointTaskConfig)
-    # since every episode now genuinely starts on the ground.
-    reset_position_jitter: float = 0.05
-    reset_yaw_jitter_deg: float = 15.0
-
-    # Truncation bounds -- same scale as HoverTaskConfig's, since the
-    # xy footprint of this task (climb straight up, hold, come straight
-    # down) doesn't need WaypointTaskConfig's wider margins.
-    max_xy_distance: float = 1.5
-    max_altitude: float = 2.0
-    max_tilt_rad: float = 0.4
-
-    # Reward shaping. position_error_weight raised vs. HoverTaskConfig's
-    # 1.0 -- "extreme precision" needs a steeper gradient near the target,
-    # not just a bonus zone. UNTESTED -- if training is unstable (compare
-    # against the entropy-runaway pattern documented in WaypointTaskConfig),
-    # this is the first thing to reconsider.
-    position_error_weight: float = 2.0
-    velocity_penalty_weight: float = 0.05
-    action_smoothness_weight: float = 0.01
-    survival_bonus: float = 0.01
-
-    # Precision bonus -- active only during the hover phase (not takeoff/
-    # landing, where being exactly on-target isn't the point yet). Tighter
-    # radius than WaypointTaskConfig's waypoint_reach_radius (0.15) since
-    # this is meant to reward genuine precision, not just arrival.
-    hover_precision_radius: float = 0.05
-    precision_bonus: float = 0.02   # per-step, while inside hover_precision_radius during hover phase
-
-    # Landing-phase velocity penalty -- same pattern as WaypointTaskConfig:
-    # REPLACES velocity_penalty_weight (not additive) once in the landing
-    # phase, since a hard landing is a much more specific failure to
-    # penalize than general "moving fast."
-    landing_velocity_penalty_weight: float = 0.3
-
-    # Disturbance injection -- active only during the hover phase, using
-    # DroneSim.apply_velocity_kick() (already existed, built for Stage 3's
-    # disturbance criterion -- see drone_sim.py). Direction random per kick,
-    # magnitude uniform in disturbance_kick_range. UNTESTED probability/
-    # magnitude -- if the policy never recovers cleanly, lower
-    # disturbance_kick_range before assuming the whole approach is wrong.
-    disturbance_enabled: bool = True
-    disturbance_prob_per_step: float = 0.01   # ~1 kick per ~3s at 30Hz control rate, expected value
-    disturbance_kick_range: tuple = (0.3, 1.0)   # m/s magnitude, uniform-sampled
-
 
 @dataclass
 class PPOConfig:
@@ -358,9 +330,16 @@ class ProjectConfig:
     hover_train.py/hover_evaluate.py/hover_demo.py calling ProjectConfig()
     with no args are unaffected. waypoint_train.py (and its evaluate/demo
     siblings) explicitly pass task=WaypointTaskConfig() instead.
-    precision_flight_train.py (added 2026-08-11, and its evaluate sibling)
-    explicitly pass task=PrecisionFlightTaskConfig()."""
+
+    PrecisionFlightTaskConfig (added 2026-08-11) was removed 2026-08-16 --
+    judged not worth keeping (design/code quality), discarded rather than
+    archived. Its checkpoints/tb_logs/gym_wrapper/train/evaluate files were
+    removed in the same pass. If disturbance injection for hover is needed,
+    see HoverTaskConfig's disturbance_* fields (added the same day, a
+    from-scratch design per docs/planning/hover-robustness-curriculum-plan.md
+    Stage 1 -- not a revival of this class's continuous per-step-probability
+    model)."""
 
     sim: SimConfig = field(default_factory=SimConfig)
-    task: HoverTaskConfig | WaypointTaskConfig | PrecisionFlightTaskConfig = field(default_factory=HoverTaskConfig)
+    task: HoverTaskConfig | WaypointTaskConfig = field(default_factory=HoverTaskConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)

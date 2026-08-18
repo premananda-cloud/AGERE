@@ -184,14 +184,22 @@ def main():
     print("=" * 55)
 
     if not args.no_tag:
+        # 2026-08-13: registry generalized to multi-task (task field + free-form
+        # metrics dict) so hover and waypoint_nav can share one registry file.
+        # Metric names below are unchanged from before generalization, just moved
+        # into the metrics dict -- any existing `best_by_metric("mean_waypoints_reached")`
+        # style query needs task="waypoint_nav" added, see model_registry.py docstring.
         h = record_eval(
+            task="waypoint_nav",
             model_path=model_path,
             seed=args.seed,
             episodes=args.episodes,
-            success_rate=success_rate,
-            mean_waypoints_reached=mean_waypoints,
-            crash_rate=crash_rate,
-            mean_reward=mean_reward,
+            metrics={
+                "success_rate": success_rate,
+                "mean_waypoints_reached": mean_waypoints,
+                "crash_rate": crash_rate,
+                "mean_reward": mean_reward,
+            },
         )
         print(f"Logged to model registry (hash {h[:12]}...). "
               f"Query with: python -m src.model_registry describe {model_path}\n")

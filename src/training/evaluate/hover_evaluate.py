@@ -20,13 +20,15 @@ given (see src/paths.py).
 """
 
 import argparse
+from dataclasses import replace
 
 import numpy as np
 from stable_baselines3 import PPO
 
-from src.config import ProjectConfig
+from src.config import ProjectConfig, HOVER_STAGE_PRESETS
 from src.paths import hover_stabilize_model_path
 from src.training.gym_wrapper.hover_gym_wrapper import HoverGymEnv
+from src.model_registry import record_eval
 
 # Stage 2 criteria, per docs/hover-model-plan.md — keep these two files in
 # sync if the plan changes.
@@ -48,6 +50,9 @@ def run_episode(env: HoverGymEnv, model: PPO, seed=None):
     truncation_reason = None
     pos_error_trace = []  # per-step, so tail episodes can be told apart:
                           # "never converged" vs. "converged then drifted"
+    kicked = False
+    recovered = None
+    recovery_time_steps = None
 
     terminated = truncated = False
     while not (terminated or truncated):
@@ -56,11 +61,16 @@ def run_episode(env: HoverGymEnv, model: PPO, seed=None):
         total_reward += reward
         final_pos_error = info["position_error_norm"]
         pos_error_trace.append(final_pos_error)
+        if info.get("kicked"):
+            kicked = True
+            recovered = info.get("recovered")
+            recovery_time_steps = info.get("recovery_time_steps")
         if truncated:
             is_crash = info.get("is_crash", False)
             truncation_reason = info.get("truncation_reason")
 
-    return final_pos_error, is_crash, total_reward, jitter_norm, start_yaw_rad, pos_error_trace, truncation_reason
+    return (final_pos_error, is_crash, total_reward, jitter_norm, start_yaw_rad, pos_error_trace,
+            truncation_reason, kicked, recovered, recovery_time_steps)
 
 
 def main():
@@ -84,12 +94,29 @@ def main():
         help="Episodes with final pos error above this are flagged as tail "
              "episodes in the summary (default 0.2 m, below the 0.3 m Stage 2 ceiling)."
     )
+    parser.add_argument(
+        "--stage", type=str, default=None, choices=sorted(HOVER_STAGE_PRESETS.keys()),
+        help="Apply a Stage 1 sub-stage's disturbance config (same presets hover_train.py uses, "
+             "from config.py's HOVER_STAGE_PRESETS) so evaluation matches how the model was "
+             "trained. REQUIRED to see any kicks at all -- without --stage, disturbance_enabled "
+             "defaults to False and this is a plain (undisturbed) hover eval regardless of what "
+             "the model was actually trained on."
+    )
+    parser.add_argument(
+        "--no-tag", action="store_true",
+        help="Skip logging this eval to the model registry (model/model_weights/registry.jsonl). "
+             "Default is to always tag, same convention as waypoint_evaluate.py. Use --no-tag for "
+             "quick throwaway checks (e.g. a --gui sanity watch) you don't want cluttering the registry."
+    )
     args = parser.parse_args()
     model_path = args.model or str(hover_stabilize_model_path())
 
     config = ProjectConfig()
     if args.gui:
         config.sim.gui = True
+    if args.stage:
+        config.task = replace(config.task, **HOVER_STAGE_PRESETS[args.stage])
+        print(f"Applied stage preset '{args.stage}' for evaluation: {HOVER_STAGE_PRESETS[args.stage]}\n")
 
     env = HoverGymEnv(config)
     model = PPO.load(model_path, device="cpu")
@@ -101,13 +128,17 @@ def main():
     yaw_jitters = []
     traces = []
     reasons = []
+    kicked_flags = []
+    recovered_flags = []
+    recovery_times = []
 
     for ep in range(args.episodes):
         # Only the first reset needs an explicit seed — gymnasium's np_random
         # carries forward deterministically from there, so the whole sequence
         # becomes reproducible without reseeding every episode.
         seed = args.seed if ep == 0 else None
-        pos_error, is_crash, total_reward, jitter_norm, start_yaw_rad, trace, reason = run_episode(env, model, seed=seed)
+        (pos_error, is_crash, total_reward, jitter_norm, start_yaw_rad, trace, reason,
+         kicked, recovered, recovery_time) = run_episode(env, model, seed=seed)
         position_errors.append(pos_error)
         crashes.append(is_crash)
         rewards.append(total_reward)
@@ -115,7 +146,18 @@ def main():
         yaw_jitters.append(abs(start_yaw_rad))
         traces.append(trace)
         reasons.append(reason)
+        kicked_flags.append(kicked)
+        recovered_flags.append(recovered)
+        recovery_times.append(recovery_time)
         crash_note = f" ({reason})" if is_crash else ""
+        kick_note = ""
+        if kicked:
+            if is_crash:
+                kick_note = " | kicked, crashed"
+            elif recovered:
+                kick_note = f" | kicked, recovered in {recovery_time} steps"
+            else:
+                kick_note = " | kicked, DID NOT recover in budget"
         print(
             f"episode {ep+1:2d}/{args.episodes} | "
             f"final pos error: {pos_error:.3f} m | "
@@ -123,6 +165,7 @@ def main():
             f"reward: {total_reward:.1f} | "
             f"start jitter: {jitter_norm:.3f} m | "
             f"start yaw jitter: {np.degrees(abs(start_yaw_rad)):.1f} deg"
+            f"{kick_note}"
         )
 
     env.close()
@@ -137,6 +180,59 @@ def main():
     print(f"Crash rate:            {crash_rate*100:.1f}%")
     print(f"Mean episode reward:   {mean_reward:.1f}")
     print("=" * 50)
+
+    # --- Stage 1 disturbance report (only if any episode was kicked) -----
+    # "kicked" requires task.disturbance_enabled to have been True during
+    # this eval run's env construction, per hover_gym_wrapper.py's
+    # _sample_kick_schedule(). If the model was trained WITH disturbance but
+    # evaluated with a plain ProjectConfig() (disturbance_enabled=False by
+    # default), this section simply won't appear -- that's a config
+    # mismatch to catch by eye (no automatic warning here), not a crash.
+    disturbance_metrics = {}
+    n_kicked = sum(kicked_flags)
+    if n_kicked > 0:
+        kicked_crashes = [c for c, k in zip(crashes, kicked_flags) if k]
+        kicked_crash_rate = float(np.mean(kicked_crashes))
+        recovered_among_survivors = [r for r, k, c in zip(recovered_flags, kicked_flags, crashes) if k and not c]
+        recovery_rate = float(np.mean(recovered_among_survivors)) if recovered_among_survivors else float("nan")
+        recovery_times_valid = [t for t in recovery_times if t is not None]
+        mean_recovery_time = float(np.mean(recovery_times_valid)) if recovery_times_valid else float("nan")
+
+        print(f"\nStage 1 disturbance report ({n_kicked}/{args.episodes} episodes kicked):")
+        print(f"  Crash rate among kicked episodes:     {kicked_crash_rate*100:.1f}%")
+        print(f"  Recovery rate (of non-crashed kicked): {recovery_rate*100:.1f}%")
+        print(f"  Mean recovery time (of recovered):     {mean_recovery_time:.1f} steps "
+              f"({mean_recovery_time/30:.2f}s @ 30Hz)" if recovery_times_valid else "  Mean recovery time: n/a (none recovered)")
+        mastery = kicked_crash_rate < 0.10 and recovery_rate > 0.90
+        print(f"  [{'PASS' if mastery else 'FAIL'}] mastery gate: crash rate <10% AND recovery rate >90%")
+
+        disturbance_metrics = {
+            "kicked_crash_rate": kicked_crash_rate,
+            "recovery_rate": recovery_rate,
+            "mean_recovery_time_steps": mean_recovery_time,
+        }
+
+    if not args.no_tag:
+        # 2026-08-13: hover_evaluate.py previously did not tag the registry at all --
+        # every hover checkpoint's eval history lived only in devlog prose / terminal
+        # scrollback. This closes that gap, same convention waypoint_evaluate.py already
+        # uses. Metric names here are free-form (registry is task-agnostic as of the
+        # 2026-08-13 generalization) -- keep these in sync with checkpoint_manager.py's
+        # TASKS["hover"] expectations if either changes.
+        h = record_eval(
+            task="hover",
+            model_path=model_path,
+            seed=args.seed,
+            episodes=args.episodes,
+            metrics={
+                "mean_position_error": mean_pos_error,
+                "crash_rate": crash_rate,
+                "mean_reward": mean_reward,
+                **disturbance_metrics,
+            },
+        )
+        print(f"Logged to model registry (hash {h[:12]}...). "
+              f"Query with: python -m src.model_registry describe {model_path}")
 
     print("\nStage 2 criteria (docs/hover-model-plan.md):")
     pos_ok = mean_pos_error < STAGE_2_MAX_POSITION_ERROR

@@ -1,0 +1,40 @@
+ibase) premananda@debian:~/projects/AGERE$ tree model
+model
+└── model_weights
+    ├── archive
+    ├── checkpoints
+    │   ├── hover_stabilize_ppo_seed0_100000_steps.zip
+    │   ├── hover_stabilize_ppo_seed0_150000_steps.zip
+    │   ├── hover_stabilize_ppo_seed0_1a_100000_steps.zip
+    │   ├── hover_stabilize_ppo_seed0_1a_150000_steps.zip
+    │   ├── hover_stabilize_ppo_seed0_1a_200000_steps.zip
+    │   ├── hover_stabilize_ppo_seed0_1a_250000_steps.zip
+    │   ├── hover_stabilize_ppo_seed0_1a_300000_steps.zip
+    │   ├── hover_stabilize_ppo_seed0_1a_50000_steps.zip
+    │   ├── hover_stabilize_ppo_seed0_200000_steps.zip
+    │   ├── hover_stabilize_ppo_seed0_250000_steps.zip
+    │   ├── hover_stabilize_ppo_seed0_300000_steps.zip
+    │   ├── hover_stabilize_ppo_seed0_350000_steps.zip
+    │   ├── hover_stabilize_ppo_seed0_400000_steps.zip
+    │   ├── hover_stabilize_ppo_seed0_450000_steps.zip
+    │   ├── hover_stabilize_ppo_seed0_500000_steps.zip
+    │   └── hover_stabilize_ppo_seed0_50000_steps.zip
+    ├── history
+    ├── hover_champion.zip
+    ├── hover_stabilize_ppo_seed0_1a.zip
+    ├── hover_stabilize_ppo_seed0.zip
+    └── registry.jsonl
+
+5 directories, 20 files
+(base) premananda@debian:~/projects/AGERE$ tree tb_logs/
+tb_logs/
+└── hover_logs
+    ├── PPO_7
+    │   └── events.out.tfevents.1786817501.debian.61224.0
+    ├── PPO_8
+    │   └── events.out.tfevents.1786850486.debian.9881.0
+    └── PPO_9
+        └── events.out.tfevents.1786876008.debian.189223.0
+
+5 directories, 3 files
+

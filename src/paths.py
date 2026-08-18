@@ -44,17 +44,28 @@ MODEL_WEIGHTS_DIR = MODEL_ROOT / "model_weights"
 HOVER_STABILIZE_TB_LOG_DIR = TB_LOG_ROOT / "hover_logs"
 
 
-def hover_stabilize_model_path(seed: int | None = None) -> Path:
+def hover_stabilize_model_path(seed: int | None = None, tag: str | None = None) -> Path:
     """Standard save/load path for a hover/stabilize PPO checkpoint.
 
-    seed=None -> model/model_weights/hover_stabilize_ppo.zip
-    seed=N    -> model/model_weights/hover_stabilize_ppo_seedN.zip
+    seed=None, tag=None       -> model/model_weights/hover_stabilize_ppo.zip
+    seed=N,    tag=None       -> model/model_weights/hover_stabilize_ppo_seedN.zip
+    seed=N,    tag="1a"       -> model/model_weights/hover_stabilize_ppo_seedN_1a.zip
+
+    tag added 2026-08-16 for the disturbance curriculum (Stage 1 sub-stages
+    1a, 1b, 1c, ...) -- without it, every sub-stage's from-scratch-or-warm-
+    started save would clobber the same canonical path, exactly the
+    path-mutability problem the model registry exists to work around at the
+    eval-tracking layer. This solves it one level earlier, at the filename
+    layer, so sub-stage checkpoints are distinguishable on disk by name
+    alone, not just by registry hash lookup.
 
     Creates the directory if it doesn't exist yet (safe to call before
     saving; a no-op if just reading an existing path for loading).
     """
     MODEL_WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
     name = f"hover_stabilize_ppo_seed{seed}" if seed is not None else "hover_stabilize_ppo"
+    if tag is not None:
+        name = f"{name}_{tag}"
     return MODEL_WEIGHTS_DIR / f"{name}.zip"
 
 

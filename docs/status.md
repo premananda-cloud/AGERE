@@ -10,10 +10,31 @@ scratch.
 ## What this project is
 
 Reinforcement learning for a multirotor drone, part of a larger project
-called **Agere** / **Backseat Driver**. Task 1, **hover/stabilize**, is
-complete (Stage 3 met, see below) and paused. Current focus is task 2,
-**waypoint navigation + landing**, scoped for a professor demo rather
-than a full multi-stage campaign — see "Current task" below.
+called **Agere** / **Backseat Driver**. **Status as of 2026-08-16, updated
+from a stale 2026-08-09-vintage description below — read this block first,
+the "Task 2" section further down is now historical, not current.**
+
+- **Task 1, hover/stabilize:** was "complete and paused" as of 2026-08-06.
+  **No longer paused — this is the current active task**, now expanded
+  into a hover-robustness disturbance curriculum. See
+  `docs/planning/hover-robustness-curriculum-plan.md` and
+  `docs/research/theory-log.md`.
+- **Task 2, waypoint navigation + landing:** was "current focus" as of
+  2026-08-09. **Retired 2026-08-16** — judged stuck at a hard local
+  optimum (802,816-step checkpoint, 3.00/5 waypoints, four independent
+  fixes all failed to beat it — full detail in the "Task 2" section
+  below, kept as historical record). Checkpoint files deliberately
+  deleted from disk; all eval/training history preserved permanently in
+  `model/model_weights/registry.jsonl` (`task=waypoint_nav`), queryable
+  via `python -m src.checkpoint_manager leaderboard waypoint_nav
+  mean_waypoints_reached` even though the weights themselves are gone.
+
+**New tooling since 2026-08-13**, not reflected anywhere below except
+here: `src/model_registry.py` (content-hash-addressed, append-only,
+multi-task) and `src/checkpoint_manager.py` (leaderboard/backfill/
+promote/archive/retire-task CLI built on top of it) now exist and are the
+standard way to pick a "champion" checkpoint for any task — see their own
+docstrings, not reproduced here.
 
 Full system architecture (unchanged, still the long-term target) is in
 `docs/architecture/Architecture.md` — PX4 flight stack + ROS 2 / uXRCE-DDS.
@@ -64,8 +85,26 @@ per-episode start randomization is implemented for both tasks.
 
 ## Code structure (`src/`)
 
-Full rationale in `docs/code-structure.md`. Both tasks now exist
-side by side under the same split (simulation vs. training):
+Full rationale in `docs/code-structure.md`. **Diagram below is
+2026-08-09-vintage and incomplete as of 2026-08-16** — additions since
+then, not reflected in the tree below:
+- `src/model_registry.py` — content-hash-addressed, multi-task, append-only
+- `src/checkpoint_manager.py` — leaderboard/backfill/promote/archive CLI
+- `config.py` gained `HoverTaskConfig.disturbance_*`/`recovery_*` fields
+  and a module-level `HOVER_STAGE_PRESETS` dict (Stage 1 sub-stage configs,
+  shared between `hover_train.py` and `hover_evaluate.py`)
+- `paths.py`'s `hover_stabilize_model_path()` gained an optional `tag`
+  param so curriculum sub-stage checkpoints don't clobber the canonical
+  path
+- `hover_train.py` gained `--init-from`, `--stage`, `--tag`,
+  `--checkpoint-every` (previously had none of these)
+- `hover_gym_wrapper.py` gained kick-injection + recovery-tracking state
+- `hover_evaluate.py` gained `--stage` and a disturbance-recovery report
+- A short-lived `PrecisionFlightTaskConfig` + its train/eval/wrapper files
+  (added 2026-08-11) were built, trained against, then judged not worth
+  keeping and fully removed 2026-08-16 — not reflected below since they no
+  longer exist; mentioned only so their absence isn't mysterious if
+  anything still references them
 
 ```
 src/
@@ -349,59 +388,67 @@ single most uncertain number in the system right now.
 **Not yet run:** the actual training run with progress shaping enabled.
 This is tomorrow's first step.
 
-### Open items
+### Open items (waypoint_nav) — HISTORICAL, task retired 2026-08-16
 
-- `waypoint_reach_radius=0.15` — **settled. Do not change based on eval
-  data from before 2026-08-08 (the stale-obs bugfix).**
-- `velocity_penalty_weight=0.05` — **settled for now, tested and
-  reverted with a real mechanistic finding (see above). Don't re-lower
-  without new evidence.**
-- Episode budget (`episode_len_sec=20`) — **settled, ruled out as the
-  bottleneck (see episode-length test above). Don't extend it expecting
-  this alone to help.**
-- `progress_shaping_weight=10.0` — new, untested in an actual training
-  run. First thing to retune if the resulting behavior looks wrong (e.g.
-  reckless straight-line rushing showing up as more crashes than the 0%
-  seen in every run to date).
-- `waypoint_bonus=15.0` — still not isolated from the ent_coef/gamma fix
-  it was bundled with; lower priority to unbundle now given other
-  findings since.
-- **`ep_rew_mean` is not a reliable proxy for waypoints-reached past the
-  802,816-step checkpoint** — two different 300k-step continuations both
-  improved training AND eval reward while waypoints-reached got worse.
-  Any future long run should use `--checkpoint-every` and be evaluated
-  at intermediate points, not trusted from the final checkpoint or the
-  TensorBoard curve alone.
-- Landing "success" is still altitude+velocity-based, not real PyBullet
-  contact detection — still untested in practice, since no episode has
-  reached the landing phase yet. Progress shaping is now explicitly
-  disabled during landing (see above) precisely because this phase is
-  still completely unexercised.
-- **`waypoint_demo.py` is broken** — still a byte-for-byte duplicate of
-  `waypoint_evaluate.py`. Not touched this session; not urgent while
-  there's no policy worth demoing yet.
-- **Cosmetic, low-priority:** `docs/decisions/devlog/2026_08_06.md` and
-  `docs/decisions/devlog/devlog_2026_08_06.md` are byte-identical
-  duplicate files. Harmless, worth deleting one when convenient.
-- Eval reproducibility — `waypoint_evaluate.py` warns when `--seed` is
-  omitted. Always pass it for anything meant to be compared later.
+Kept for the record; no longer actionable since the task is retired and
+its checkpoint weights are deleted (see "What this project is" at top).
+
+- `waypoint_reach_radius=0.15` — settled, not revisited.
+- `velocity_penalty_weight=0.05` — settled, not revisited.
+- Episode budget (`episode_len_sec=20`) — ruled out as the bottleneck,
+  not revisited.
+- `progress_shaping_weight=10.0` — **never actually run.** The
+  2026-08-09 session ended with this written, reviewed, and one bug
+  caught before any run used it (see below) — the run itself never
+  happened before the retirement decision. If waypoint nav is ever
+  revived, this experiment is still the logical next step, not a dead
+  end.
+- Landing phase — never once exercised in any run across the task's
+  entire history. Real PyBullet contact-based "success" was never
+  implemented or tested.
+- `waypoint_demo.py` — was broken (duplicate of `waypoint_evaluate.py`),
+  never fixed. Moot now.
+
+### Current open items (hover, active as of 2026-08-16)
+
+- **Sub-stage 1a's magnitude range (0.1–0.3 m/s) is confirmed too low to
+  teach anything** — the untouched Stage 0 champion already passes 1a's
+  mastery gate with zero disturbance-specific training (see
+  `training-log.md` Run 2026-08-16-1, `theory-log.md` Theory
+  2026-08-16-3). Next step: a single manual eval at ~0.4–0.5 m/s against
+  the untouched champion to find where its baseline competence actually
+  breaks, before choosing revised magnitude numbers for the curriculum.
+  Not yet done.
+- Two still-unexplained crash-rate blips exist in the hover data:
+  Stage 0's 250k–350k window (overcorrection hypothesis tested and
+  **refuted** via `train/std`, mechanism still unknown — Theory
+  2026-08-16-0/1) and 1a's 300k checkpoint specifically (10% crash,
+  every neighboring checkpoint 0% — Theory 2026-08-16-2, not yet
+  confirmed as real vs. sampling noise; a `--seed 7` rerun would settle
+  it, not yet done).
+- A hover demo script exists (`src/training/demo/hover_demo.py`) but
+  hasn't been reviewed or extended to show the disturbance-recovery
+  behavior — in progress as of this update.
+- `hover_evaluate.py`'s `--stage` flag is required to see any disturbance
+  behavior at all; omitting it silently evaluates as if undisturbed
+  regardless of how the model was trained — easy to forget, worth double
+  -checking on any future eval command.
+- `checkpoint_manager.py`'s `backfill` command doesn't know about
+  `--stage` — disturbance-curriculum checkpoints need manual
+  `hover_evaluate.py --stage <X>` calls per checkpoint, not the
+  automated backfill loop. Not yet fixed.
 
 ### Next action
 
-Run the progress-shaping experiment tomorrow, from the restored
-802,816-step baseline, with `--checkpoint-every 50000` from the start
-(not added after the fact this time):
-```
-python -m src.training.waypoint_train --init-from model/model_weights/waypoint_nav_ppo_seed0.zip --timesteps 300000 --seed 0 --checkpoint-every 50000
-```
-Sweep all 6 checkpoints against `--seed 42` rather than trusting the
-final one — given the `ep_rew_mean`-vs-waypoints-reached divergence
-found today, this is no longer optional. Watch specifically: (1) whether
-any episode finally reaches the landing phase at all — new information
-this task has never produced; (2) if one does, whether `hard_landing`
-stays at 0% in the crash breakdown, which would confirm the landing-phase
-exclusion fix was worth making; (3) `train/std` stays flat, confirming
-nothing about this change reopens the entropy-runaway issue.
+1. Find the real Level-1-equivalent floor: manual eval of
+   `hover_champion.zip` at ~0.4–0.5 m/s, no training, to calibrate where
+   the curriculum's actual starting difficulty should be.
+2. Revise `HOVER_STAGE_PRESETS["1a"]` (or introduce a new sub-stage) in
+   `config.py` with the corrected magnitude range once that number exists.
+3. Resolve or deprioritize the 300k crash-blip reproduction check
+   (`--seed 7` rerun) — cheap, but not blocking.
+4. See `docs/planning/hover-robustness-curriculum-plan.md` for the full
+   sub-stage roadmap (1a revised → 1b → 1c → 1d → 1e → 1f) beyond this.
 
 ---
 
@@ -428,21 +475,34 @@ nothing about this change reopens the entropy-runaway issue.
 
 ## Other docs in this repo worth reading, in rough priority order
 
-1. `docs/decisions/devlog/2026_08_09.md` — today's session: velocity-
-   penalty test/revert, checkpoint sweep confirming the 802,816-step
-   local optimum, episode-length test ruling out budget, progress-shaping
-   addition + landing-phase fix
-2. `docs/training-log.md` — living log, one entry per training run, both
-   tasks; see the 2026-08-08/09 waypoint entries for full run-by-run
-   detail behind this file's summary
-3. `docs/decisions/devlog/2026_08_06.md` — waypoint task build + first
-   real run + initial diagnosis (superseded in part — the "needs more
-   timesteps" conclusion there turned out to be premature; see "Task 2"
-   above for why)
-4. `docs/code-structure.md` — full reasoning for the src/ layout above
-5. `docs/hover-model-plan.md` — hover task spec + staged completion criteria
-6. `docs/planning/stage3-push-plan.md` — hover Stage 3 push + the pivot
-   decision to waypoint nav
-7. `docs/devlog/2026_07_30.md` — the AGERE/AGERE_sims split decision
-8. `docs/architecture/Architecture.md` — long-term system architecture (PX4/ROS2)
-Weghts and logs backed up to huging face
+**Current (hover), read these first:**
+1. `docs/planning/hover-robustness-curriculum-plan.md` — the active plan:
+   Stage 0 (done), Stage 1 disturbance curriculum design and sub-stage
+   roadmap
+2. `docs/research/theory-log.md` — dated hypothesis/interpretation log,
+   companion to training-log.md's raw results
+3. `docs/training-log.md` — living log; hover entries from 2026-08-16
+   onward are current, everything before that predates the from-scratch
+   retrain and the tooling described above
+4. `src/model_registry.py` / `src/checkpoint_manager.py` — read their
+   module docstrings for the champion-selection tooling now used for any
+   task
+
+**Historical (waypoint_nav, retired 2026-08-16):**
+5. `docs/decisions/devlog/2026_08_09.md` — velocity-penalty test/revert,
+   checkpoint sweep confirming the 802,816-step local optimum, episode-
+   length test ruling out budget, progress-shaping addition (never run)
+6. `docs/decisions/devlog/2026_08_06.md` — waypoint task build + first
+   real run + initial diagnosis
+7. `docs/code-structure.md` — full reasoning for the src/ layout
+   (2026-08-09-vintage, see the note in the code-structure section above
+   for what's changed since)
+8. `docs/hover-model-plan.md` — original hover task spec + Stage 1–3
+   completion criteria (superseded in spirit by the robustness curriculum
+   plan for anything past Stage 3, but Stages 1–3's criteria are still
+   the ones `hover_evaluate.py` checks)
+9. `docs/planning/stage3-push-plan.md` — hover Stage 3 push + the
+   original pivot decision to waypoint nav (itself now superseded by the
+   pivot back)
+10. `docs/devlog/2026_07_30.md` — the AGERE/AGERE_sims split decision
+11. `docs/architecture/Architecture.md` — long-term system architecture (PX4/ROS2)

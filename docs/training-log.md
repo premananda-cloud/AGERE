@@ -813,3 +813,73 @@ phase — new information this task has never produced; (2) if one does,
 whether `hard_landing` stays at 0%, confirming the landing-phase
 exclusion fix was worth making; (3) `train/std` stays flat, confirming
 this doesn't reopen the entropy-runaway issue from Run 2026-08-06-1.
+
+
+### Run 2026-08-16-0 — hover_stabilize_ppo_seed0, from-scratch baseline, 500k steps
+
+Fresh from-scratch run (no init_from — hover_train.py has no warm-start path),
+seed=0, --checkpoint-every 25000... actually saved at 50k intervals per SB3's
+CheckpointCallback rounding to nearest n_steps multiple. 11 checkpoints total
+(50k-500k) + final save, all backfilled through the registry (seed=42, 20
+episodes/checkpoint):
+
+| Steps        | Mean pos error | Crash rate | Hash        |
+|--------------|-----------------|------------|-------------|
+| 450,000      | 0.020 m         | 0%         | f9153039... |
+| 400,000      | 0.024 m         | 5%         | 33f67eba... |
+| 500,000      | 0.024 m         | 0%         | 3a406650... |
+| final(~502k) | 0.025 m         | 5%         | 3c742f0d... |
+| 300,000      | 0.034 m         | 50%        | 441c1a6e... |
+| 250,000      | 0.035 m         | 80%        | dd380618... |
+| 350,000      | 0.044 m         | 10%        | bf1d2c09... |
+| 200,000      | 0.074 m         | 0%         | 87620be6... |
+| 150,000      | 0.202 m         | 0%         | 101e06f7... |
+| 50,000       | 0.251 m         | 0%         | 2bc8eb84... |
+| 100,000      | 0.264 m         | 0%         | 6170c1f8... |
+
+Champion: 450,000-step checkpoint (f9153039...) — lowest position error AND
+0% crash rate simultaneously, not a tradeoff. Also mildly beats the final
+save (0.020 vs 0.025 m, 0% vs 5% crash) — same "final save isn't
+automatically best" shape as the waypoint story, much gentler here.
+
+Real finding: a crash-rate spike at 250k-350k (peaking 80% at 250k) that
+resolves by 450k, WHILE position error over the same window looks good
+(0.034-0.044 m, second-best band overall). Checking position error alone
+would have missed this entirely — see theory-log.md Theory 2026-08-16-0 for
+the working hypothesis on mechanism. Promoted 450k checkpoint to
+hover_champion.zip via checkpoint_manager.
+
+Full episode-level backfill logged in registry.jsonl (task=hover).
+
+### Run 2026-08-16-1 — hover_stabilize_ppo_seed0_1a, warm-started from champion, 300k steps
+
+Trained from hover_champion.zip with Stage 1a preset (single kick,
+0.1-0.3 m/s, step window 60-150, recovery threshold 0.2m/60 steps).
+6 checkpoints (50k-300k) + final (~301k), all evaluated with --stage 1a.
+
+Result: NULL. The untouched champion (zero 1a training) passes the exact
+same mastery gate the trained checkpoints do -- 0% crash, 100% recovery,
+0.021m mean error, every single recovery logged as "0 steps" across every
+checkpoint including the untrained baseline. Confirmed via direct
+side-by-side eval of hover_champion.zip under --stage 1a. Level 1's
+magnitude range (0.1-0.3 m/s) never displaces the drone past the 0.2m
+recovery threshold in the first place -- sub-stage 1a as specified did
+not exercise recovery behavior at all, so the ~300k training steps spent
+on it produced no measurable change. Not a wasted debugging session --
+this is a real, useful negative result (see plan doc update below) -- but
+1a's checkpoints should NOT be treated as "hover champion + kick-hardened,"
+they're statistically indistinguishable from the champion alone.
+
+One checkpoint (300,000 steps specifically) showed 10% crash rate (2/20,
+both tilt) where every other checkpoint including the champion baseline
+showed 0% -- see theory-log.md 2026-08-16-2. Given the null result above,
+this is now read as more likely noise on a 2-episode sample (or a
+transient artifact of continued fine-tuning) than a real capability
+regression, but not yet confirmed either way -- reproduction check with
+a different seed still open.
+
+Decision: do not promote any 1a checkpoint as a new champion. Proceed to
+1b (introduces Level 2, 0.3-0.6 m/s) directly from hover_champion.zip,
+not from any 1a checkpoint, since 1a training added no verified value to
+warm-start from. Revise the plan doc's magnitude levels before running 1b
+-- see below.

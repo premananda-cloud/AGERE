@@ -46,7 +46,7 @@ class DroneSim:
             pyb_freq=sim_config.pyb_freq,
             ctrl_freq=sim_config.ctrl_freq,
             gui=sim_config.gui,
-            record=False,
+            record=sim_config.record,
             obs=ObservationType.KIN,
             act=ActionType.VEL,
         )
