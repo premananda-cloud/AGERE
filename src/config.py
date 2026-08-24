@@ -14,21 +14,104 @@ class SimConfig:
     """Low-level PyBullet simulation settings — owned by environments/,
     read by DroneSim. No RL concepts here (no reward, no episode length)."""
 
-    pyb_freq: int = 240   # PyBullet physics step rate (Hz)
-    ctrl_freq: int = 30   # How often the sim accepts a new action (Hz);
-                           # must evenly divide pyb_freq
-    gui: bool = False     # True to render the PyBullet window locally
+    pyb_freq: int = 240  # PyBullet physics step rate (Hz)
+    ctrl_freq: int = 30  # How often the sim accepts a new action (Hz);
+    # must evenly divide pyb_freq
+    gui: bool = False  # True to render the PyBullet window locally
     record: bool = False  # True to save video output (added 2026-08-16).
-        # Passed straight through to gym-pybullet-drones' HoverAviary,
-        # which handles this itself: with gui=True, produces a real .mp4
-        # via PyBullet's own p.startStateLogging(STATE_LOGGING_VIDEO_MP4);
-        # with gui=False, saves per-step PNG frames instead (no built-in
-        # mp4 muxing in that mode -- needs ffmpeg to stitch afterward).
-        # CONFIRMED (read gym-pybullet-drones source directly, 2026-08-16):
-        # output always lands in ./results/ relative to the process's cwd
-        # -- HoverAviary never exposes output_folder to its own
-        # constructor, so it can't be redirected from here regardless of
-        # what's passed in DroneSim.
+    # Passed straight through to gym-pybullet-drones' HoverAviary,
+    # which handles this itself: with gui=True, produces a real .mp4
+    # via PyBullet's own p.startStateLogging(STATE_LOGGING_VIDEO_MP4);
+    # with gui=False, saves per-step PNG frames instead (no built-in
+    # mp4 muxing in that mode -- needs ffmpeg to stitch afterward).
+    # CONFIRMED (read gym-pybullet-drones source directly, 2026-08-16):
+    # output always lands in ./results/ relative to the process's cwd
+    # -- HoverAviary never exposes output_folder to its own
+    # constructor, so it can't be redirected from here regardless of
+    # what's passed in DroneSim.
+
+
+# === Disturbance Type System (added 2026-08-24) ===
+
+DISTURBANCE_LEVELS = 5
+
+
+@dataclass(frozen=True)
+class DisturbanceTypeConfig:
+    """Configuration for a specific disturbance type (kick, torque, or wind).
+
+    Attributes:
+        name: "kick" | "torque" | "wind" — must match DroneSim method dispatch
+        unit: For logging/printing only
+        level_bounds: Length 6: [L0..L5] boundaries; level i covers
+                     [bounds[i-1], bounds[i]), i in 1..5
+        duration_steps: 1 = instantaneous; >1 = sustained, re-applied every step
+    """
+
+    name: str
+    unit: str
+    level_bounds: tuple
+    duration_steps: int = 1
+
+
+# --- Kick (impulse, m/s) ---------------------------------------------------
+# Floor shifted up from the original 1a preset's 0.1-0.3 m/s range, which is
+# CONFIRMED too weak (training-log.md Run 2026-08-16-1: hover_champion.zip
+# passes 1a's mastery gate with zero disturbance training — the magnitude
+# never displaces the drone past the 0.2m recovery threshold). Still worth a
+# quick manual calibration eval before fully trusting L1; this is a
+# corrected starting point, not a validated one.
+KICK_CONFIG = DisturbanceTypeConfig(
+    name="kick",
+    unit="m/s",
+    level_bounds=(0.3, 0.5, 0.8, 1.1, 1.5, 2.0),
+    duration_steps=1,
+)
+
+# --- Torque (angular impulse, rad/s) ---------------------------------------
+# UNVALIDATED PLACEHOLDER. No prior run or reference number exists for this
+# axis (taxonomy type 7 was flagged "needs real numbers" and never resolved
+# further). Pick a manual calibration eval here too before trusting these
+# bounds, same discipline that caught the kick-floor problem.
+TORQUE_CONFIG = DisturbanceTypeConfig(
+    name="torque",
+    unit="rad/s",
+    level_bounds=(1.0, 2.0, 4.0, 6.0, 9.0, 13.0),
+    duration_steps=1,
+)
+
+# --- Wind (sustained force, N) ----------------------------------------------
+# UNVALIDATED ESTIMATE, scaled against the CF2X's own hover thrust
+# (m=0.027kg * g=9.81 ~= 0.265N, i.e. the force budget the controller must
+# already spend just to not fall) rather than an arbitrary absolute number —
+# same "defensible ceiling, not a guessed adjective" discipline the plan doc
+# used for kicks, but this one hasn't been checked against real behavior yet.
+# duration_steps=90 is ~3s at a 30Hz control loop — adjust to your actual
+# ctrl_freq if it differs.
+WIND_CONFIG = DisturbanceTypeConfig(
+    name="wind",
+    unit="N",
+    level_bounds=(0.02, 0.04, 0.07, 0.10, 0.14, 0.18),
+    duration_steps=90,
+)
+
+DISTURBANCE_TYPES = {
+    "kick": KICK_CONFIG,
+    "torque": TORQUE_CONFIG,
+    "wind": WIND_CONFIG,
+}
+
+
+def magnitude_to_level(type_name: str, magnitude: float) -> int:
+    """Bucket a sampled magnitude back into its 1-5 level, for eval
+    reporting (hover_evaluate.py can group results by level even though
+    training samples level uniformly and magnitude uniformly within it).
+    """
+    bounds = DISTURBANCE_TYPES[type_name].level_bounds
+    for level in range(1, DISTURBANCE_LEVELS + 1):
+        if bounds[level - 1] <= magnitude <= bounds[level]:
+            return level
+    return DISTURBANCE_LEVELS  # clamp, shouldn't hit given how sampling works
 
 
 @dataclass
@@ -38,7 +121,7 @@ class HoverTaskConfig:
     are RL design choices, not physics facts, so they live here rather
     than in SimConfig."""
 
-    target_position: tuple = (0.0, 0.0, 1.0)   # meters, world frame
+    target_position: tuple = (0.0, 0.0, 1.0)  # meters, world frame
     episode_len_sec: float = 8.0
 
     # Reset randomization around target_position. Non-zero on purpose:
@@ -48,9 +131,9 @@ class HoverTaskConfig:
     reset_yaw_jitter_deg: float = 15.0
 
     # Truncation bounds (episode ends as failure if exceeded)
-    max_xy_distance: float = 1.5     # meters from origin, x or y
-    max_altitude: float = 2.0        # meters
-    max_tilt_rad: float = 0.4        # roll or pitch, radians (~23 degrees)
+    max_xy_distance: float = 1.5  # meters from origin, x or y
+    max_altitude: float = 2.0  # meters
+    max_tilt_rad: float = 0.4  # roll or pitch, radians (~23 degrees)
 
     # Reward shaping weights
     position_error_weight: float = 1.0
@@ -64,39 +147,38 @@ class HoverTaskConfig:
     # docs/planning/hover-robustness-curriculum-plan.md "Stage 1" section
     # for the full reasoning behind every number below; this is the
     # implementation of that design, not a fresh decision.
+
+    # Master enable/disable switch
     disturbance_enabled: bool = False
 
-    # How many apply_velocity_kick() events per episode, and where in the
-    # episode (control steps) each is allowed to land. Sub-stage 1a uses
-    # exactly one kick; later sub-stages (1e/1f) raise
-    # disturbance_kicks_per_episode and this generalizes without further
-    # wrapper changes -- see hover_gym_wrapper.py's reset().
-    disturbance_kicks_per_episode: int = 1
-    disturbance_kick_step_min: int = 60    # 2s into an 8s/240-step episode
-    disturbance_kick_step_max: int = 150   # 5s in -- leaves room to observe recovery
-    disturbance_min_kick_spacing_steps: int = 30   # only matters when kicks_per_episode > 1
+    # Which disturbance types to sample from (subset of "kick", "torque", "wind")
+    # One type is sampled uniformly per episode when enabled
+    disturbance_types_active: tuple = ("kick", "torque", "wind")
 
-    # Magnitude range, m/s -- uniform-sampled per kick, direction random.
-    # Grounded in the platform's own max controllable speed (~8.3 m/s, see
-    # plan doc): sub-stage 1a = Level 1 (~2-4% of max speed).
-    disturbance_kick_min_mps: float = 0.1
-    disturbance_kick_max_mps: float = 0.3
+    # Timing window for disturbance events (control steps)
+    disturbance_kick_step_min: int = 60  # 2s into an 8s/240-step episode
+    disturbance_kick_step_max: int = 150  # 5s in — leaves room to observe recovery
 
-    # "Recovered" = position error back under this threshold, sustained for
-    # this many consecutive steps, not just touched once. threshold reuses
-    # hover_evaluate.py's existing tail_threshold (0.2m) rather than a new
-    # disconnected number; hold_steps=60 -> 2s at 30Hz ctrl_freq.
-    recovery_threshold_m: float = 0.2
-    recovery_hold_steps: int = 60
+    # Recovery criteria
+    recovery_threshold_m: float = 0.2  # Position error threshold for recovery
+    recovery_hold_steps: int = 60  # Steps to hold recovery before episode ends
+
+    # --- DEPRECATED FIELDS (no longer used by the new disturbance system) ---
+    # These are kept for backward compatibility but not read by the updated
+    # hover_gym_wrapper.py — the new system fires exactly one event per episode
+    # and samples type+level+magnitude uniformly from the DISTURBANCE_TYPES
+    # system above.
+    disturbance_kicks_per_episode: int = 1  # DEPRECATED
+    disturbance_min_kick_spacing_steps: int = 30  # DEPRECATED
+    disturbance_kick_min_mps: float = 0.1  # DEPRECATED (use KICK_CONFIG)
+    disturbance_kick_max_mps: float = 0.3  # DEPRECATED (use KICK_CONFIG)
 
 
 # Stage 1 sub-stage presets, per docs/planning/hover-robustness-curriculum-plan.md.
 # Single source of truth for hover_train.py AND hover_evaluate.py -- both import
 # this rather than each keeping their own copy, so training and evaluation can
 # never silently drift onto different disturbance configs for "the same" stage.
-# Only 1a is defined so far -- add 1b/1c/etc. here as each becomes the active
-# sub-stage. Values here must match the plan doc; if they diverge, one of the
-# two is wrong.
+# Values here must match the plan doc; if they diverge, one of the two is wrong.
 HOVER_STAGE_PRESETS: dict[str, dict] = {
     "1a": dict(
         disturbance_enabled=True,
@@ -107,6 +189,18 @@ HOVER_STAGE_PRESETS: dict[str, dict] = {
         disturbance_kick_max_mps=0.3,
         recovery_threshold_m=0.2,
         recovery_hold_steps=60,
+    ),
+    # --- New 3x5 disturbance preset (added 2026-08-24) ---
+    # This is the only config change needed to make the new disturbance system
+    # runnable — hover_train.py's existing --stage flag already does
+    # `replace(config.task, **STAGE_PRESETS[args.stage])`, so no changes to
+    # hover_train.py itself are required.
+    "disturbance_3x5": dict(
+        disturbance_enabled=True,
+        disturbance_types_active=("kick", "torque", "wind"),
+        # Uses new system's default values for timing and recovery:
+        # disturbance_kick_step_min=60, disturbance_kick_step_max=150,
+        # recovery_threshold_m=0.2, recovery_hold_steps=60
     ),
 }
 
@@ -126,9 +220,11 @@ class WaypointTaskConfig:
         (0.0, 1.5, 1.5),
         (-1.0, 1.0, 1.0),
         (0.0, 0.0, 0.5),
-    )   # meters, world frame, visited in order
+    )  # meters, world frame, visited in order
 
-    waypoint_reach_radius: float = 0.15   # meters — within this = "reached," advance to next
+    waypoint_reach_radius: float = (
+        0.15  # meters — within this = "reached," advance to next
+    )
     # NOT changed in this pass. tb_logs analysis (2026-08-07/08) shows the
     # policy's route failures are a pacing/entropy problem, not a
     # precision problem (see waypoint_evaluate.py's new "closest approach
@@ -136,7 +232,7 @@ class WaypointTaskConfig:
     # that report shows episodes getting within radius and failing to
     # register, or getting close-but-not-close-enough on their stuck leg.
     # Don't change it blind.
-    episode_len_sec: float = 20.0          # longer than hover's 8s — more ground to cover
+    episode_len_sec: float = 20.0  # longer than hover's 8s — more ground to cover
 
     # Reset randomization — same idea as hover: don't memorize one exact
     # start, learn to reach waypoint 1 from a nearby range of starts.
@@ -151,10 +247,14 @@ class WaypointTaskConfig:
     max_tilt_rad: float = 0.4
 
     # Landing phase — begins once the final waypoint is reached.
-    landing_target_altitude: float = 0.05   # near-ground, not exactly 0 (avoids
-                                              # divide-by-zero / degenerate reward near contact)
-    landing_max_velocity: float = 0.15      # m/s — vertical speed at touchdown to count as "soft"
-    landing_hold_time_sec: float = 2.0      # must stay down + stable for this long to count as success
+    landing_target_altitude: float = 0.05  # near-ground, not exactly 0 (avoids
+    # divide-by-zero / degenerate reward near contact)
+    landing_max_velocity: float = (
+        0.15  # m/s — vertical speed at touchdown to count as "soft"
+    )
+    landing_hold_time_sec: float = (
+        2.0  # must stay down + stable for this long to count as success
+    )
 
     # Reward shaping weights — same pattern as hover, plus one new term.
     #
@@ -194,9 +294,11 @@ class WaypointTaskConfig:
     # experiment — if the next run's result is ambiguous, un-bundle this
     # from the ent_coef/gamma change before iterating further.
     waypoint_bonus: float = 15.0
-    landing_velocity_penalty_weight: float = 0.3   # only active during landing phase — much
-                                                     # heavier than the general velocity penalty,
-                                                     # specifically to punish crashing into the ground fast
+    landing_velocity_penalty_weight: float = (
+        0.3  # only active during landing phase — much
+    )
+    # heavier than the general velocity penalty,
+    # specifically to punish crashing into the ground fast
 
     # ADDED 2026-08-09 — potential-based progress shaping (bigger swing,
     # per-checkpoint decision to try after the 802,816-step checkpoint
@@ -262,7 +364,6 @@ class WaypointTaskConfig:
     # (which doesn't otherwise know about it) isn't worth the coupling
     # for a demo-scoped project.
     progress_shaping_weight: float = 10.0
-
 
 
 @dataclass

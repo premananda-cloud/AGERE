@@ -12,7 +12,7 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from src.actions.velocity_action import ACTION_DIM, normalize_action
-from src.config import ProjectConfig
+from src.config import ProjectConfig, DISTURBANCE_TYPES, DISTURBANCE_LEVELS
 from src.environments.drone_sim import DroneSim
 
 
@@ -41,50 +41,81 @@ class HoverGymEnv(gym.Env):
         self._target_yaw_rad = 0.0
         self._prev_action = np.zeros(ACTION_DIM, dtype=np.float32)
 
-        # --- Disturbance (Stage 1, 2026-08-16) -----------------------------
-        # Per-episode kick schedule and recovery-tracking state. All reset in
-        # reset(); see that method for the sampling logic and step() for
-        # when kicks actually fire and how recovery is measured. Kept as
-        # plain instance state (not a separate class) since HoverGymEnv
-        # already owns all other per-episode state the same way
-        # (_step_count, _prev_action).
-        self._pending_kick_steps: list[int] = []
-        self._last_kick_step: int | None = None
+        # --- Disturbance (3-type / 5-level scoped design, superseding the
+        # single-kick-only Stage 1a mechanism) ------------------------------
+        # ONE disturbance event per episode, type + level sampled uniformly
+        # from DISTURBANCE_TYPES/config.task.disturbance_types_active; see
+        # _sample_disturbance_event() for the full reasoning. All reset in
+        # reset(); step() applies the event at the right step(s) and tracks
+        # recovery. Kept as plain instance state, same pattern as
+        # _step_count/_prev_action above.
+        self._disturbance_event: dict | None = None
+        self._last_event_step: int | None = None
         self._recovery_hold_counter = 0
         self._recovery_achieved = False
         self._recovery_time_steps: int | None = None
-        self._any_kick_fired = False
+        self._disturbance_fired = False
+        self._wind_errors_during_window: list[float] = []
 
-    def _sample_kick_schedule(self) -> list[int]:
-        """Sample this episode's kick step(s), respecting the configured
-        step window and minimum spacing between kicks. Returns a sorted
-        list of control-step indices at which a kick will fire — empty if
-        disturbance is disabled for this task config.
+    def _sample_disturbance_event(self) -> dict | None:
+        """Sample this episode's single disturbance event: which of the 3
+        scoped types (kick/torque/wind), which of the 5 magnitude levels,
+        the concrete magnitude within that level's range, a randomized
+        direction, and the onset step (plus, for wind, the active window).
 
-        Only called from reset(); step() just consumes this list in order.
+        Design note — bounded, not open-ended: rather than a strict
+        cumulative curriculum of narrow sub-stage presets (1a -> 1b ->
+        1c -> ...), which already produced one wasted 300k-step run on an
+        under-powered single-level preset (training-log.md Run
+        2026-08-16-1), this samples the whole scoped 3-type x 5-level
+        space directly in one training run. Levels exist for EVAL
+        reporting granularity, not separate training phases.
+
+        Level is sampled uniformly over 1..5 (not magnitude sampled
+        uniformly over the type's full range) so severe levels get equal
+        training exposure regardless of how wide their raw span is.
+
+        Only called from reset(); step() just consumes the returned dict.
+        Returns None if disturbance is disabled or no type/window is
+        available this episode.
         """
         if not getattr(self.task, "disturbance_enabled", False):
-            return []
+            return None
 
-        n = self.task.disturbance_kicks_per_episode
-        lo, hi = self.task.disturbance_kick_step_min, self.task.disturbance_kick_step_max
-        # Clamp the window to fit inside this episode -- a longer-episode
-        # config (Stage 1 sub-stages 1d+) may reuse the same window values
-        # unmodified; this guards against a misconfigured window exceeding
-        # _max_steps rather than silently sampling an invalid step.
-        hi = min(hi, self._max_steps - 1)
-        if lo >= hi:
-            return []
+        active_types = list(self.task.disturbance_types_active)
+        if not active_types:
+            return None
+        type_name = active_types[int(self.np_random.integers(0, len(active_types)))]
+        type_cfg = DISTURBANCE_TYPES[type_name]
 
-        min_spacing = self.task.disturbance_min_kick_spacing_steps
-        steps: list[int] = []
-        attempts = 0
-        while len(steps) < n and attempts < 100:
-            attempts += 1
-            candidate = int(self.np_random.integers(lo, hi + 1))
-            if all(abs(candidate - s) >= min_spacing for s in steps):
-                steps.append(candidate)
-        return sorted(steps)
+        level = int(self.np_random.integers(1, DISTURBANCE_LEVELS + 1))  # 1..5 inclusive
+        lo, hi = type_cfg.level_bounds[level - 1], type_cfg.level_bounds[level]
+        magnitude = float(self.np_random.uniform(lo, hi))
+
+        direction = self.np_random.normal(size=3)
+        norm = np.linalg.norm(direction)
+        direction = direction / norm if norm > 1e-6 else np.array([1.0, 0.0, 0.0])
+
+        lo_step = self.task.disturbance_kick_step_min
+        hi_step = self.task.disturbance_kick_step_max
+        # Clamp so onset + duration fits inside this episode -- guards
+        # against a longer-duration type (wind) or a misconfigured window
+        # exceeding _max_steps rather than silently sampling an invalid
+        # schedule.
+        hi_step = min(hi_step, self._max_steps - 1 - type_cfg.duration_steps)
+        if lo_step >= hi_step:
+            return None
+        onset_step = int(self.np_random.integers(lo_step, hi_step + 1))
+
+        return {
+            "type": type_name,
+            "level": level,
+            "magnitude": magnitude,
+            "direction": direction,
+            "onset_step": onset_step,
+            "duration_steps": type_cfg.duration_steps,
+            "end_step": onset_step + type_cfg.duration_steps - 1,
+        }
 
     # ------------------------------------------------------------------
     def _obs_from_state(self, state) -> np.ndarray:
@@ -155,12 +186,13 @@ class HoverGymEnv(gym.Env):
         # Disturbance state, per-episode -- sampled AFTER super().reset()
         # seeds self.np_random, so this respects the same seed as the rest
         # of the episode's randomization (position/yaw jitter above).
-        self._pending_kick_steps = self._sample_kick_schedule()
-        self._last_kick_step = None
+        self._disturbance_event = self._sample_disturbance_event()
+        self._last_event_step = None
         self._recovery_hold_counter = 0
         self._recovery_achieved = False
         self._recovery_time_steps = None
-        self._any_kick_fired = False
+        self._disturbance_fired = False
+        self._wind_errors_during_window = []
 
         obs = self._obs_from_state(state)
         # Exposed so callers (evaluate.py's tail diagnostics, in particular)
@@ -181,41 +213,53 @@ class HoverGymEnv(gym.Env):
 
         self._step_count += 1
 
-        # --- Disturbance: fire a scheduled kick, if this is the step for one ---
-        # Applied AFTER apply_action() advances physics for this step, so the
-        # kick's effect is visible starting next step's observation -- matches
-        # apply_velocity_kick()'s own semantics (instantaneous velocity add,
-        # not routed through this step's control command).
-        if self._pending_kick_steps and self._step_count == self._pending_kick_steps[0]:
-            direction = self.np_random.normal(size=3)
-            norm = np.linalg.norm(direction)
-            direction = direction / norm if norm > 1e-6 else np.array([1.0, 0.0, 0.0])
-            magnitude = self.np_random.uniform(
-                self.task.disturbance_kick_min_mps, self.task.disturbance_kick_max_mps
-            )
-            self.sim.apply_velocity_kick(direction * magnitude)
-            self._pending_kick_steps.pop(0)
-            self._last_kick_step = self._step_count
-            self._any_kick_fired = True
-            # A new kick resets the recovery streak -- if a second kick lands
-            # before the first's hold window completed, recovery is judged
-            # against the MOST RECENT kick only (multi-kick sub-stages 1e/1f).
-            self._recovery_hold_counter = 0
-            self._recovery_achieved = False
+        # --- Disturbance: fire/sustain the scheduled event, if this is the
+        # step (or step range) for it. Applied AFTER apply_action() advances
+        # physics for this step, so the effect is visible starting next
+        # step's observation -- matches apply_velocity_kick()'s own
+        # semantics (instantaneous velocity add, not routed through this
+        # step's control command); apply_sustained_force() for wind carries
+        # the analogous caveat (see DroneSim docstring).
+        ev = self._disturbance_event
+        if ev is not None:
+            if ev["type"] in ("kick", "torque") and self._step_count == ev["onset_step"]:
+                delta = ev["direction"] * ev["magnitude"]
+                if ev["type"] == "kick":
+                    self.sim.apply_velocity_kick(delta)
+                else:
+                    self.sim.apply_torque_kick(delta)
+                self._disturbance_fired = True
+                self._last_event_step = self._step_count
+                self._recovery_hold_counter = 0
+                self._recovery_achieved = False
 
-        # --- Recovery tracking, relative to the most recent kick ---------
-        if self._last_kick_step is not None and not self._recovery_achieved:
+            elif ev["type"] == "wind" and ev["onset_step"] <= self._step_count <= ev["end_step"]:
+                force = ev["direction"] * ev["magnitude"]
+                self.sim.apply_sustained_force(force)
+                self._disturbance_fired = True
+                self._wind_errors_during_window.append(float(np.linalg.norm(obs[0:3])))
+                if self._step_count == ev["end_step"]:
+                    # Wind has just stopped this step -- start the same
+                    # recovery-hold tracking used for kick/torque, anchored
+                    # to the END of the window (recovery from a sustained
+                    # push is measured from when the push stops, not from
+                    # when it started).
+                    self._last_event_step = self._step_count
+                    self._recovery_hold_counter = 0
+                    self._recovery_achieved = False
+
+        # --- Recovery tracking, relative to the most recent event -------
+        if self._last_event_step is not None and not self._recovery_achieved:
             pos_error_norm = float(np.linalg.norm(obs[0:3]))
             if pos_error_norm < self.task.recovery_threshold_m:
                 self._recovery_hold_counter += 1
                 if self._recovery_hold_counter >= self.task.recovery_hold_steps:
                     self._recovery_achieved = True
-                    # Steps from kick to the START of the sustained-recovery
-                    # window, not to when the hold finished -- this is the
-                    # number that actually reflects "how fast did it recover,"
-                    # per the plan doc's per-trial logging spec.
+                    # Steps from event to the START of the sustained-recovery
+                    # window, not to when the hold finished -- same
+                    # convention as the original Stage 1a tracking.
                     self._recovery_time_steps = (
-                        self._step_count - self._recovery_hold_counter + 1 - self._last_kick_step
+                        self._step_count - self._recovery_hold_counter + 1 - self._last_event_step
                     )
             else:
                 self._recovery_hold_counter = 0  # violation resets the streak, same
@@ -233,13 +277,18 @@ class HoverGymEnv(gym.Env):
             info["is_crash"] = reason in ("out_of_bounds", "tilt")
         info["position_error_norm"] = float(np.linalg.norm(obs[0:3]))
 
-        # Disturbance summary info, only meaningful (and only populated) once
-        # the episode has actually seen a kick -- evaluate.py should check
-        # "kicked" before reading "recovered"/"recovery_time_steps".
-        if self._any_kick_fired:
-            info["kicked"] = True
+        # Disturbance summary info, only meaningful (and only populated)
+        # once the episode has actually seen its event fire -- callers
+        # should check "disturbance_fired" before reading recovery fields.
+        if self._disturbance_fired:
+            info["disturbance_fired"] = True
+            info["disturbance_type"] = ev["type"]
+            info["disturbance_level"] = ev["level"]
+            info["disturbance_magnitude"] = ev["magnitude"]
             info["recovered"] = self._recovery_achieved
             info["recovery_time_steps"] = self._recovery_time_steps
+            if ev["type"] == "wind" and self._wind_errors_during_window:
+                info["wind_steady_state_error_mean"] = float(np.mean(self._wind_errors_during_window))
 
         self._prev_action = np.asarray(action, dtype=np.float32)
         return obs, reward, terminated, truncated, info

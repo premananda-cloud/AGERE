@@ -119,6 +119,34 @@ class DroneSim:
             physicsClientId=self._aviary.CLIENT,
         )
 
+    def apply_torque_kick(self, delta_angular_velocity: np.ndarray) -> None:
+        """Instantaneously add `delta_angular_velocity` (rad/s, world-frame
+        axes per PyBullet's resetBaseVelocity convention) to the drone's
+        current angular velocity — Type 7 (angular/spin, torque impulse)
+        in docs/planning/hover-robustness-curriculum-plan.md's disturbance
+        taxonomy. Simulates e.g. a prop-wash clip or minor collision
+        imparting spin, as opposed to apply_velocity_kick()'s translational
+        push.
+
+        Mirrors apply_velocity_kick()'s mechanism exactly (direct
+        kinematic override via resetBaseVelocity, not routed through the
+        physics solver) but touches angularVelocity instead of
+        linearVelocity, leaving current linear velocity untouched. The two
+        kick types are independently composable (nothing here prevents a
+        future config from firing both in one episode) though the current
+        3-type/5-level design fires at most one disturbance event per
+        episode — see HoverGymEnv._sample_disturbance_event().
+        """
+        import pybullet as p
+
+        current = self.get_state().angular_velocity
+        new_angular = np.asarray(current, dtype=np.float64) + np.asarray(delta_angular_velocity, dtype=np.float64)
+        p.resetBaseVelocity(
+            self._aviary.DRONE_IDS[0],
+            angularVelocity=new_angular.tolist(),
+            physicsClientId=self._aviary.CLIENT,
+        )
+
     def apply_impulse_force(self, force: np.ndarray) -> None:
         """Apply a one-shot external force (Newtons, world frame) at the
         drone's current position, via PyBullet's applyExternalForce — the
@@ -138,6 +166,41 @@ class DroneSim:
         doesn't depend on substep timing, prefer apply_velocity_kick()
         above; this method exists because the plan doc names
         applyExternalForce specifically.
+        """
+        import pybullet as p
+
+        state = self.get_state()
+        p.applyExternalForce(
+            objectUniqueId=self._aviary.DRONE_IDS[0],
+            linkIndex=-1,
+            forceObj=np.asarray(force, dtype=np.float64).tolist(),
+            posObj=state.position.tolist(),
+            flags=p.WORLD_FRAME,
+            physicsClientId=self._aviary.CLIENT,
+        )
+
+    def apply_sustained_force(self, force: np.ndarray) -> None:
+        """Apply `force` (Newtons, world frame) at the drone's current
+        position for THIS control step only — Type 1 (sustained wind) in
+        the disturbance taxonomy. Must be called every control step for
+        the duration of a wind window to approximate a continuous force:
+        PyBullet clears external forces after each simulation step (same
+        caveat as apply_impulse_force() above), and this class has no hook
+        into HoverAviary.step()'s internal physics substeps, so each call
+        here only genuinely acts on the first physics substep of the NEXT
+        apply_action() call. Re-applied every control step, this
+        approximates "wind that doesn't relent for N control steps" —
+        it is not a literally continuous force across every physics
+        substep, and that distinction could matter if pyb_freq/ctrl_freq
+        is large enough that the un-forced substeps dominate. Good enough
+        as a first approximation; flagged rather than silently assumed
+        exact.
+
+        Caller (HoverGymEnv) is responsible for calling this once per step
+        during an active wind window and NOT calling it once the window
+        ends — this method has no concept of "duration" itself, unlike
+        apply_velocity_kick()/apply_torque_kick() which are one-shot by
+        nature.
         """
         import pybullet as p
 
