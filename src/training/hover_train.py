@@ -171,8 +171,15 @@ def main():
         # set_env() auto-wraps a raw (non-Vec) env in a DummyVecEnv+Monitor
         # if needed, and leaves an already-vectorized SubprocVecEnv as-is --
         # correct either way, same as build_ppo()'s explicit check below.
-        model = PPO.load(args.init_from, device="cpu")
-        model.set_env(env)
+        # set_env() requires the loaded model's env count to match exactly
+        # (SB3 raises AssertionError otherwise, since rollout buffers are
+        # sized against n_envs) -- champion checkpoints trained before
+        # --n-envs existed have n_envs=1 baked in, so attaching a
+        # SubprocVecEnv here would fail whenever --n-envs != 1. Passing
+        # `env` directly into PPO.load() instead re-initializes those
+        # buffers against whatever env count is given, rather than
+        # assuming it must match what the checkpoint was trained with.
+        model = PPO.load(args.init_from, env=env, device="cpu")
         if args.seed is not None:
             model.set_random_seed(args.seed)
     else:
