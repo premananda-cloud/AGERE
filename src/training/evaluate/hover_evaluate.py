@@ -8,6 +8,13 @@ with randomized starts, and reports:
   - crash rate (out-of-bounds or excessive tilt, NOT counting timeout as a
     crash — reaching the timeout means it survived the whole episode)
   - mean episode reward, for reference against training-log.md entries
+  - IF the model/config were trained with disturbance (--stage flag): a
+    per-type, per-level breakdown (crash rate, recovery rate, recovery
+    time for kick/torque; steady-state error for wind), per the 3-type/
+    5-level design in docs/hover-disturbance-3x5-design.md. This replaced
+    the older single-kick-type "Stage 1 disturbance report" section —
+    see that doc for why (Stage 1a's narrow single-level preset produced
+    a null result with no way to see WHICH magnitude was too weak).
 
 Usage:
     python -m src.training.evaluate.hover_evaluate
@@ -15,17 +22,29 @@ Usage:
     python -m src.training.evaluate.hover_evaluate --episodes 20
     python -m src.training.evaluate.hover_evaluate --gui   # watch the eval episodes
 
+    # Evaluating a model trained with the 3x5 disturbance design --
+    # REQUIRED --stage flag, same reason as before: without it,
+    # disturbance_enabled defaults to False and you silently get a plain
+    # undisturbed eval regardless of what the model was trained on.
+    # More episodes than the Stage-2 default of 20 are recommended here:
+    # with 3 types x 5 levels = 15 buckets, 20 episodes averages under
+    # 1.5 samples/bucket. 90+ gives ~6/bucket, enough to not be pure noise.
+    python -m src.training.evaluate.hover_evaluate \\
+        --model model/model_weights/hover_stabilize_ppo_seed0_disturbance_3x5.zip \\
+        --stage disturbance_3x5 --episodes 90
+
 Defaults to model/hover_stabilize/hover_stabilize_ppo.zip if --model isn't
 given (see src/paths.py).
 """
 
 import argparse
+from collections import defaultdict
 from dataclasses import replace
 
 import numpy as np
 from stable_baselines3 import PPO
 
-from src.config import ProjectConfig, HOVER_STAGE_PRESETS
+from src.config import ProjectConfig, HOVER_STAGE_PRESETS, DISTURBANCE_TYPES, DISTURBANCE_LEVELS
 from src.paths import hover_stabilize_model_path
 from src.training.gym_wrapper.hover_gym_wrapper import HoverGymEnv
 from src.model_registry import record_eval
@@ -35,8 +54,18 @@ from src.model_registry import record_eval
 STAGE_2_MAX_POSITION_ERROR = 0.3   # meters
 STAGE_2_MAX_CRASH_RATE = 0.10      # fraction of episodes
 
+# Mastery gate, per docs/hover-robustness-curriculum-plan.md — same bar
+# originally defined for Stage 1a, now applied per disturbance type.
+MASTERY_MAX_CRASH_RATE = 0.10
+MASTERY_MIN_RECOVERY_RATE = 0.90
 
-def run_episode(env: HoverGymEnv, model: PPO, seed=None):
+# Below this episode count, the per-type/per-level breakdown is too thin
+# to mean much (3 types x 5 levels = 15 buckets) — a heads-up, not a hard
+# stop, since a quick sanity run at 20 episodes is still a legitimate use.
+RECOMMENDED_MIN_EPISODES_FOR_3X5 = 45  # ~3 samples/bucket at the low end
+
+
+def run_episode(env: HoverGymEnv, model: PPO, seed=None) -> dict:
     obs, reset_info = env.reset(seed=seed)
     start_position = reset_info["start_position"]
     start_yaw_rad = reset_info["start_yaw_rad"]
@@ -50,9 +79,14 @@ def run_episode(env: HoverGymEnv, model: PPO, seed=None):
     truncation_reason = None
     pos_error_trace = []  # per-step, so tail episodes can be told apart:
                           # "never converged" vs. "converged then drifted"
-    kicked = False
+
+    disturbance_fired = False
+    disturbance_type = None
+    disturbance_level = None
+    disturbance_magnitude = None
     recovered = None
     recovery_time_steps = None
+    wind_steady_state_error_mean = None
 
     terminated = truncated = False
     while not (terminated or truncated):
@@ -61,16 +95,135 @@ def run_episode(env: HoverGymEnv, model: PPO, seed=None):
         total_reward += reward
         final_pos_error = info["position_error_norm"]
         pos_error_trace.append(final_pos_error)
-        if info.get("kicked"):
-            kicked = True
+        if info.get("disturbance_fired"):
+            disturbance_fired = True
+            disturbance_type = info.get("disturbance_type")
+            disturbance_level = info.get("disturbance_level")
+            disturbance_magnitude = info.get("disturbance_magnitude")
             recovered = info.get("recovered")
             recovery_time_steps = info.get("recovery_time_steps")
+            if "wind_steady_state_error_mean" in info:
+                wind_steady_state_error_mean = info["wind_steady_state_error_mean"]
         if truncated:
             is_crash = info.get("is_crash", False)
             truncation_reason = info.get("truncation_reason")
 
-    return (final_pos_error, is_crash, total_reward, jitter_norm, start_yaw_rad, pos_error_trace,
-            truncation_reason, kicked, recovered, recovery_time_steps)
+    return {
+        "final_pos_error": final_pos_error,
+        "is_crash": is_crash,
+        "total_reward": total_reward,
+        "jitter_norm": jitter_norm,
+        "start_yaw_rad": start_yaw_rad,
+        "pos_error_trace": pos_error_trace,
+        "truncation_reason": truncation_reason,
+        "disturbance_fired": disturbance_fired,
+        "disturbance_type": disturbance_type,
+        "disturbance_level": disturbance_level,
+        "disturbance_magnitude": disturbance_magnitude,
+        "recovered": recovered,
+        "recovery_time_steps": recovery_time_steps,
+        "wind_steady_state_error_mean": wind_steady_state_error_mean,
+    }
+
+
+def _disturbance_episode_note(ep: dict) -> str:
+    if not ep["disturbance_fired"]:
+        return ""
+    type_cfg = DISTURBANCE_TYPES[ep["disturbance_type"]]
+    label = f"{ep['disturbance_type']} L{ep['disturbance_level']} ({ep['disturbance_magnitude']:.3f}{type_cfg.unit})"
+    if ep["is_crash"]:
+        return f" | {label}, crashed"
+    if ep["disturbance_type"] == "wind" and ep["wind_steady_state_error_mean"] is not None:
+        wind_note = f", steady-state err {ep['wind_steady_state_error_mean']:.3f}m"
+    else:
+        wind_note = ""
+    if ep["recovered"]:
+        return f" | {label}{wind_note}, recovered in {ep['recovery_time_steps']} steps"
+    return f" | {label}{wind_note}, DID NOT recover in budget"
+
+
+def _print_disturbance_report(episodes: list, n_total_episodes: int) -> dict:
+    """Per-type, per-level breakdown. Returns a flat metrics dict suitable
+    for record_eval() — keys prefixed by type, e.g. "kick_crash_rate".
+
+    Design note: a bucket (type, level) can legitimately have zero samples
+    at low --episodes counts, since type+level are each sampled uniformly
+    per episode (1/3 * 1/5 = 1/15 chance of any specific bucket per
+    episode). Buckets with zero samples are reported as "n/a", not
+    silently skipped — an empty bucket is itself informative (means this
+    run can't say anything about that magnitude yet).
+    """
+    fired = [ep for ep in episodes if ep["disturbance_fired"]]
+    if not fired:
+        return {}
+
+    print(f"\nDisturbance report ({len(fired)}/{n_total_episodes} episodes had an event fire):")
+    if n_total_episodes < RECOMMENDED_MIN_EPISODES_FOR_3X5:
+        print(
+            f"  NOTE: {n_total_episodes} episodes across 3 types x {DISTURBANCE_LEVELS} levels = "
+            f"15 buckets averages under {n_total_episodes/15:.1f} samples/bucket. Per-level numbers "
+            f"below are directional at this count, not statistically solid -- consider "
+            f"--episodes {RECOMMENDED_MIN_EPISODES_FOR_3X5}+ for a trustworthy breakdown."
+        )
+
+    by_type = defaultdict(list)
+    for ep in fired:
+        by_type[ep["disturbance_type"]].append(ep)
+
+    metrics = {}
+    for type_name in DISTURBANCE_TYPES:
+        type_eps = by_type.get(type_name, [])
+        print(f"\n  --- {type_name} ({len(type_eps)}/{len(fired)} of fired episodes) ---")
+        if not type_eps:
+            print("    n/a — never sampled this run")
+            continue
+
+        crash_rate = float(np.mean([ep["is_crash"] for ep in type_eps]))
+        survivors = [ep for ep in type_eps if not ep["is_crash"]]
+        recovery_rate = float(np.mean([ep["recovered"] for ep in survivors])) if survivors else float("nan")
+        recovery_times = [ep["recovery_time_steps"] for ep in survivors if ep["recovered"]]
+        mean_recovery_time = float(np.mean(recovery_times)) if recovery_times else float("nan")
+
+        print(f"    Crash rate:          {crash_rate*100:5.1f}%  (n={len(type_eps)})")
+        print(f"    Recovery rate:       {recovery_rate*100:5.1f}%  (of {len(survivors)} non-crashed)")
+        if recovery_times:
+            print(f"    Mean recovery time:  {mean_recovery_time:.1f} steps ({mean_recovery_time/30:.2f}s @ 30Hz)")
+        else:
+            print("    Mean recovery time:  n/a (none recovered)")
+
+        if type_name == "wind":
+            steady_errors = [ep["wind_steady_state_error_mean"] for ep in type_eps
+                              if ep["wind_steady_state_error_mean"] is not None]
+            if steady_errors:
+                print(f"    Mean steady-state error during wind window: {float(np.mean(steady_errors)):.3f} m")
+
+        mastery = crash_rate < MASTERY_MAX_CRASH_RATE and (
+            recovery_rate > MASTERY_MIN_RECOVERY_RATE if survivors else False
+        )
+        print(f"    [{'PASS' if mastery else 'FAIL'}] mastery gate: crash rate <10% AND recovery rate >90%")
+
+        metrics[f"{type_name}_crash_rate"] = crash_rate
+        metrics[f"{type_name}_recovery_rate"] = recovery_rate
+        metrics[f"{type_name}_mean_recovery_time_steps"] = mean_recovery_time
+        metrics[f"{type_name}_n_episodes"] = len(type_eps)
+
+        # Per-level sub-breakdown, same type.
+        by_level = defaultdict(list)
+        for ep in type_eps:
+            by_level[ep["disturbance_level"]].append(ep)
+        level_line = []
+        for level in range(1, DISTURBANCE_LEVELS + 1):
+            level_eps = by_level.get(level, [])
+            if not level_eps:
+                level_line.append(f"L{level}: n/a")
+                continue
+            lc = float(np.mean([e["is_crash"] for e in level_eps]))
+            l_survivors = [e for e in level_eps if not e["is_crash"]]
+            lr = float(np.mean([e["recovered"] for e in l_survivors])) if l_survivors else float("nan")
+            level_line.append(f"L{level}: n={len(level_eps)} crash={lc*100:.0f}% recover={lr*100:.0f}%")
+        print("    By level: " + " | ".join(level_line))
+
+    return metrics
 
 
 def main():
@@ -96,11 +249,11 @@ def main():
     )
     parser.add_argument(
         "--stage", type=str, default=None, choices=sorted(HOVER_STAGE_PRESETS.keys()),
-        help="Apply a Stage 1 sub-stage's disturbance config (same presets hover_train.py uses, "
-             "from config.py's HOVER_STAGE_PRESETS) so evaluation matches how the model was "
-             "trained. REQUIRED to see any kicks at all -- without --stage, disturbance_enabled "
-             "defaults to False and this is a plain (undisturbed) hover eval regardless of what "
-             "the model was actually trained on."
+        help="Apply a stage's disturbance config (same presets hover_train.py uses, from "
+             "config.py's HOVER_STAGE_PRESETS) so evaluation matches how the model was trained. "
+             "REQUIRED to see any disturbance events at all -- without --stage, "
+             "disturbance_enabled defaults to False and this is a plain (undisturbed) hover eval "
+             "regardless of what the model was actually trained on."
     )
     parser.add_argument(
         "--no-tag", action="store_true",
@@ -117,58 +270,43 @@ def main():
     if args.stage:
         config.task = replace(config.task, **HOVER_STAGE_PRESETS[args.stage])
         print(f"Applied stage preset '{args.stage}' for evaluation: {HOVER_STAGE_PRESETS[args.stage]}\n")
+        if getattr(config.task, "disturbance_enabled", False) and args.episodes < RECOMMENDED_MIN_EPISODES_FOR_3X5:
+            print(
+                f"NOTE: --episodes {args.episodes} is below the recommended "
+                f"{RECOMMENDED_MIN_EPISODES_FOR_3X5}+ for a trustworthy 3-type/5-level breakdown "
+                f"(15 buckets total). Proceeding anyway -- fine for a quick sanity check.\n"
+            )
 
     env = HoverGymEnv(config)
     model = PPO.load(model_path, device="cpu")
 
-    position_errors = []
-    crashes = []
-    rewards = []
-    jitter_norms = []
-    yaw_jitters = []
-    traces = []
-    reasons = []
-    kicked_flags = []
-    recovered_flags = []
-    recovery_times = []
-
+    episodes = []
     for ep in range(args.episodes):
         # Only the first reset needs an explicit seed — gymnasium's np_random
         # carries forward deterministically from there, so the whole sequence
         # becomes reproducible without reseeding every episode.
         seed = args.seed if ep == 0 else None
-        (pos_error, is_crash, total_reward, jitter_norm, start_yaw_rad, trace, reason,
-         kicked, recovered, recovery_time) = run_episode(env, model, seed=seed)
-        position_errors.append(pos_error)
-        crashes.append(is_crash)
-        rewards.append(total_reward)
-        jitter_norms.append(jitter_norm)
-        yaw_jitters.append(abs(start_yaw_rad))
-        traces.append(trace)
-        reasons.append(reason)
-        kicked_flags.append(kicked)
-        recovered_flags.append(recovered)
-        recovery_times.append(recovery_time)
-        crash_note = f" ({reason})" if is_crash else ""
-        kick_note = ""
-        if kicked:
-            if is_crash:
-                kick_note = " | kicked, crashed"
-            elif recovered:
-                kick_note = f" | kicked, recovered in {recovery_time} steps"
-            else:
-                kick_note = " | kicked, DID NOT recover in budget"
+        result = run_episode(env, model, seed=seed)
+        episodes.append(result)
+
+        crash_note = f" ({result['truncation_reason']})" if result["is_crash"] else ""
         print(
             f"episode {ep+1:2d}/{args.episodes} | "
-            f"final pos error: {pos_error:.3f} m | "
-            f"crash: {is_crash}{crash_note} | "
-            f"reward: {total_reward:.1f} | "
-            f"start jitter: {jitter_norm:.3f} m | "
-            f"start yaw jitter: {np.degrees(abs(start_yaw_rad)):.1f} deg"
-            f"{kick_note}"
+            f"final pos error: {result['final_pos_error']:.3f} m | "
+            f"crash: {result['is_crash']}{crash_note} | "
+            f"reward: {result['total_reward']:.1f} | "
+            f"start jitter: {result['jitter_norm']:.3f} m | "
+            f"start yaw jitter: {np.degrees(abs(result['start_yaw_rad'])):.1f} deg"
+            f"{_disturbance_episode_note(result)}"
         )
 
     env.close()
+
+    position_errors = [e["final_pos_error"] for e in episodes]
+    crashes = [e["is_crash"] for e in episodes]
+    rewards = [e["total_reward"] for e in episodes]
+    jitter_norms = [e["jitter_norm"] for e in episodes]
+    yaw_jitters = [abs(e["start_yaw_rad"]) for e in episodes]
 
     mean_pos_error = float(np.mean(position_errors))
     crash_rate = float(np.mean(crashes))
@@ -181,36 +319,9 @@ def main():
     print(f"Mean episode reward:   {mean_reward:.1f}")
     print("=" * 50)
 
-    # --- Stage 1 disturbance report (only if any episode was kicked) -----
-    # "kicked" requires task.disturbance_enabled to have been True during
-    # this eval run's env construction, per hover_gym_wrapper.py's
-    # _sample_kick_schedule(). If the model was trained WITH disturbance but
-    # evaluated with a plain ProjectConfig() (disturbance_enabled=False by
-    # default), this section simply won't appear -- that's a config
-    # mismatch to catch by eye (no automatic warning here), not a crash.
-    disturbance_metrics = {}
-    n_kicked = sum(kicked_flags)
-    if n_kicked > 0:
-        kicked_crashes = [c for c, k in zip(crashes, kicked_flags) if k]
-        kicked_crash_rate = float(np.mean(kicked_crashes))
-        recovered_among_survivors = [r for r, k, c in zip(recovered_flags, kicked_flags, crashes) if k and not c]
-        recovery_rate = float(np.mean(recovered_among_survivors)) if recovered_among_survivors else float("nan")
-        recovery_times_valid = [t for t in recovery_times if t is not None]
-        mean_recovery_time = float(np.mean(recovery_times_valid)) if recovery_times_valid else float("nan")
-
-        print(f"\nStage 1 disturbance report ({n_kicked}/{args.episodes} episodes kicked):")
-        print(f"  Crash rate among kicked episodes:     {kicked_crash_rate*100:.1f}%")
-        print(f"  Recovery rate (of non-crashed kicked): {recovery_rate*100:.1f}%")
-        print(f"  Mean recovery time (of recovered):     {mean_recovery_time:.1f} steps "
-              f"({mean_recovery_time/30:.2f}s @ 30Hz)" if recovery_times_valid else "  Mean recovery time: n/a (none recovered)")
-        mastery = kicked_crash_rate < 0.10 and recovery_rate > 0.90
-        print(f"  [{'PASS' if mastery else 'FAIL'}] mastery gate: crash rate <10% AND recovery rate >90%")
-
-        disturbance_metrics = {
-            "kicked_crash_rate": kicked_crash_rate,
-            "recovery_rate": recovery_rate,
-            "mean_recovery_time_steps": mean_recovery_time,
-        }
+    # --- Disturbance report (3 types x 5 levels; empty dict if no events
+    # fired, e.g. --stage wasn't passed or this run's config had it off) --
+    disturbance_metrics = _print_disturbance_report(episodes, args.episodes)
 
     if not args.no_tag:
         # 2026-08-13: hover_evaluate.py previously did not tag the registry at all --
@@ -256,7 +367,7 @@ def main():
     print(f"\nTail episodes (final pos error > {args.tail_threshold} m): {len(tail_idx)}/{args.episodes}")
     if tail_idx:
         for i in tail_idx:
-            trace = np.asarray(traces[i])
+            trace = np.asarray(episodes[i]["pos_error_trace"])
             min_error = float(trace.min())
             step_of_min = int(trace.argmin())
             # Last 10% of the episode vs. its best moment — cheap way to tell
@@ -265,11 +376,12 @@ def main():
             tail_window = trace[-max(1, len(trace) // 10):]
             drifted = min_error < args.tail_threshold * 0.6 and float(tail_window.mean()) > min_error * 1.5
             pattern = "converged then drifted" if drifted else "never converged"
+            dist_note = _disturbance_episode_note(episodes[i])
             print(
                 f"  episode {i+1:2d} | pos error {position_errors[i]:.3f} m | "
                 f"reward {rewards[i]:.1f} | start jitter {jitter_norms[i]:.3f} m | "
                 f"start yaw jitter {np.degrees(yaw_jitters[i]):.1f} deg | "
-                f"best={min_error:.3f} m @ step {step_of_min}/{len(trace)} ({pattern})"
+                f"best={min_error:.3f} m @ step {step_of_min}/{len(trace)} ({pattern}){dist_note}"
             )
         mean_tail_jitter = float(np.mean([jitter_norms[i] for i in tail_idx]))
         mean_other_jitter = float(np.mean([j for i, j in enumerate(jitter_norms) if i not in tail_idx])) \
@@ -281,7 +393,17 @@ def main():
         print(f"  mean start jitter (non-tail episodes): {mean_other_jitter:.3f} m")
         print(f"  mean start yaw jitter (tail episodes):     {mean_tail_yaw:.1f} deg")
         print(f"  mean start yaw jitter (non-tail episodes): {mean_other_yaw:.1f} deg")
+        # Disturbance-aware note: a disturbed episode landing in the tail is
+        # expected and not itself a red flag -- only non-disturbed episodes
+        # in the tail point at a general policy weak spot vs. disturbance
+        # recovery specifically.
+        n_tail_disturbed = sum(1 for i in tail_idx if episodes[i]["disturbance_fired"])
+        if n_tail_disturbed:
+            print(f"  ({n_tail_disturbed}/{len(tail_idx)} tail episodes had a disturbance event fire -- "
+                  f"expected overlap, not necessarily a general policy weak spot)")
 
+    pos_correlation = None
+    yaw_correlation = None
     if len(set(jitter_norms)) > 1 and tail_idx:
         pos_correlation = float(np.corrcoef(jitter_norms, position_errors)[0, 1])
         print(f"\nCorrelation (start jitter vs. final pos error):     {pos_correlation:+.2f}")
@@ -297,12 +419,12 @@ def main():
         else:
             print(f"  -> Ambiguous relationship with {label} alone.")
 
-    if tail_idx and len(set(jitter_norms)) > 1:
+    if tail_idx and pos_correlation is not None:
         _describe(pos_correlation, "position jitter")
-    if tail_idx and len(set(yaw_jitters)) > 1:
+    if tail_idx and yaw_correlation is not None:
         _describe(yaw_correlation, "yaw jitter")
 
-    if tail_idx and len(set(jitter_norms)) > 1 and len(set(yaw_jitters)) > 1:
+    if tail_idx and pos_correlation is not None and yaw_correlation is not None:
         if pos_correlation < 0.4 and yaw_correlation < 0.4:
             print(
                 "\nNeither start condition strongly predicts the tail. This leans toward "
@@ -312,7 +434,9 @@ def main():
                 "episode stability issue (reward/PID interaction, maybe survival_bonus "
                 "vs. position_error_weight balance); the latter points at slow/incomplete "
                 "convergence within the episode length, which more training timesteps "
-                "might fix on its own."
+                "might fix on its own. If most tail episodes also show a disturbance note, "
+                "check the disturbance report above before concluding this is a general "
+                "weak spot rather than a disturbance-recovery gap."
             )
 
     # --- Crash report ----------------------------------------------------
@@ -325,13 +449,17 @@ def main():
     if crash_idx:
         print(f"\nCrashed episodes: {len(crash_idx)}/{args.episodes}")
         for i in crash_idx:
+            dist_note = _disturbance_episode_note(episodes[i])
             print(
-                f"  episode {i+1:2d} | reason: {reasons[i]} | final pos error {position_errors[i]:.3f} m | "
+                f"  episode {i+1:2d} | reason: {episodes[i]['truncation_reason']} | "
+                f"final pos error {position_errors[i]:.3f} m | "
                 f"reward {rewards[i]:.1f} | start jitter {jitter_norms[i]:.3f} m | "
-                f"start yaw jitter {np.degrees(yaw_jitters[i]):.1f} deg"
+                f"start yaw jitter {np.degrees(yaw_jitters[i]):.1f} deg{dist_note}"
             )
+        n_crash_disturbed = sum(1 for i in crash_idx if episodes[i]["disturbance_fired"])
         print(
-            "  Crashes matter independently of the position-error tail — a policy that "
+            f"  {n_crash_disturbed}/{len(crash_idx)} crashes had a disturbance event fire. "
+            "Crashes matter independently of the position-error tail — a policy that "
             "rarely-but-genuinely crashes is a different (and more serious) problem than "
             "one that just converges slowly. Worth tracking whether this reproduces on "
             "other seeds/eval runs before assuming it's a one-off."
