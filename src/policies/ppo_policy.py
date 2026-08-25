@@ -9,6 +9,7 @@ training script at it — the env and action space don't change at all.
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import VecEnv
 
 from src.config import PPOConfig
 
@@ -19,7 +20,17 @@ def build_ppo(
     tensorboard_log: str | None = None,
     seed: int | None = None,
 ) -> PPO:
-    monitored_env = Monitor(env)
+    if isinstance(env, VecEnv):
+        # Already vectorized -- e.g. hover_train.py's --n-envs path builds a
+        # SubprocVecEnv where each sub-env is already individually
+        # Monitor-wrapped inside its own process (see make_hover_env()).
+        # Wrapping again here would double-count episode stats (SB3's
+        # ep_rew_mean/ep_len_mean logging reads Monitor's own bookkeeping,
+        # and a double-wrap makes that bookkeeping wrong, not just
+        # redundant) -- so skip it for the already-vectorized case.
+        monitored_env = env
+    else:
+        monitored_env = Monitor(env)
     model = PPO(
         policy="MlpPolicy",
         env=monitored_env,
@@ -34,7 +45,7 @@ def build_ppo(
         policy_kwargs={"net_arch": ppo_config.net_arch},
         tensorboard_log=tensorboard_log,
         verbose=1,
-        device = 'cpu',
+        device='cpu',
         seed=seed,
     )
     return model

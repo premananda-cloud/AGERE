@@ -86,13 +86,25 @@ TORQUE_CONFIG = DisturbanceTypeConfig(
 # already spend just to not fall) rather than an arbitrary absolute number —
 # same "defensible ceiling, not a guessed adjective" discipline the plan doc
 # used for kicks, but this one hasn't been checked against real behavior yet.
-# duration_steps=90 is ~3s at a 30Hz control loop — adjust to your actual
+# duration_steps=60 is ~2s at a 30Hz control loop — adjust to your actual
 # ctrl_freq if it differs.
+#
+# FIXED 2026-08-25: was duration_steps=90 (~3s). Combined with a
+# [60,150]-step onset window and recovery_hold_steps=60, a wind window that
+# ends late in that range left no room for the required 60-step recovery
+# hold before the 240-step (8s) episode ended — recovery was structurally
+# impossible for a large fraction of episodes regardless of policy quality
+# (confirmed against the disturbance_3x5 eval: L5 recovery read 12% while
+# in-window steady-state error stayed under 0.06m the whole time, i.e. the
+# policy was fine, the eval window just didn't fit). Shortened to 60 steps
+# and hover_gym_wrapper.py's onset-window clamp now also subtracts
+# recovery_hold_steps, not just duration_steps, so this can't recur for a
+# future duration/window change without the clamp catching it.
 WIND_CONFIG = DisturbanceTypeConfig(
     name="wind",
     unit="N",
     level_bounds=(0.02, 0.04, 0.07, 0.10, 0.14, 0.18),
-    duration_steps=90,
+    duration_steps=60,
 )
 
 DISTURBANCE_TYPES = {

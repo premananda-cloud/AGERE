@@ -98,11 +98,19 @@ class HoverGymEnv(gym.Env):
 
         lo_step = self.task.disturbance_kick_step_min
         hi_step = self.task.disturbance_kick_step_max
-        # Clamp so onset + duration fits inside this episode -- guards
-        # against a longer-duration type (wind) or a misconfigured window
-        # exceeding _max_steps rather than silently sampling an invalid
-        # schedule.
-        hi_step = min(hi_step, self._max_steps - 1 - type_cfg.duration_steps)
+        # Clamp so onset + duration + a full recovery-hold window all fit
+        # inside this episode. Reserving room for recovery_hold_steps here
+        # (not just duration_steps) matters for sustained types (wind):
+        # without it, an event ending late in the sampling window leaves
+        # no room for the required recovery hold before the episode ends,
+        # making "recovered" structurally unreachable regardless of policy
+        # quality -- this is exactly what happened before this fix (see
+        # WIND_CONFIG's 2026-08-25 comment in config.py). Applies to all
+        # types uniformly so this can't silently recur for a future type,
+        # even though it's a no-op correction for instantaneous types
+        # (duration_steps=1) whose onset was already comfortably clear of
+        # this constraint.
+        hi_step = min(hi_step, self._max_steps - 1 - type_cfg.duration_steps - self.task.recovery_hold_steps)
         if lo_step >= hi_step:
             return None
         onset_step = int(self.np_random.integers(lo_step, hi_step + 1))

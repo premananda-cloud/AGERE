@@ -18,6 +18,15 @@ Usage:
         --init-from model/model_weights/hover_champion.zip \\
         --timesteps 300000 --checkpoint-every 50000
 
+    # Parallel environments (2026-08-25): PyBullet stepping in a single
+    # process is the actual bottleneck for this workload (tiny [64,64] MLP
+    # -- GPU wouldn't help, see docs decision note), not GPU compute.
+    # --n-envs spins up N PyBullet instances in separate processes via
+    # SB3's SubprocVecEnv, each collecting rollout data in parallel:
+    python -m src.training.hover_train --seed 0 --stage disturbance_3x5 \\
+        --init-from model/model_weights/hover_champion.zip \\
+        --timesteps 500000 --checkpoint-every 50000 --n-envs 6
+
 Saves to model/model_weights/hover_stabilize_ppo[_seed{N}][_{tag}].zip (see
 src/paths.py's flat-directory convention) — not the working directory.
 Intermediate checkpoints (if --checkpoint-every is set) save to
@@ -33,6 +42,8 @@ from dataclasses import replace
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import SubprocVecEnv
 
 from src.config import ProjectConfig, HOVER_STAGE_PRESETS
 from src.paths import hover_stabilize_model_path, HOVER_STABILIZE_TB_LOG_DIR, MODEL_WEIGHTS_DIR
@@ -44,6 +55,32 @@ from src.model_registry import record_run
 # Kept as a module-level alias here so the rest of this file (STAGE_PRESETS[...])
 # doesn't need to change; the actual dict is defined once, in config.py.
 STAGE_PRESETS = HOVER_STAGE_PRESETS
+
+
+def make_hover_env(config: ProjectConfig, seed: int | None, rank: int):
+    """Return a zero-arg thunk that builds one Monitor-wrapped HoverGymEnv.
+
+    Needed (rather than just passing an env instance) because
+    SubprocVecEnv spawns each sub-environment in its own process and needs
+    a picklable callable per env, not a shared object -- `config` (a plain
+    dataclass) is picklable, so the closure over it works fine under the
+    default fork start method on Linux.
+
+    Each sub-env gets its own PyBullet client (DroneSim.__init__ calls
+    HoverAviary(...), which opens its own p.connect()) once it's actually
+    constructed inside its subprocess -- nothing here shares simulation
+    state across ranks. `rank` offsets the seed per sub-env so parallel
+    envs don't all sample identical episode start conditions.
+    """
+
+    def _init():
+        env = HoverGymEnv(config)
+        env = Monitor(env)
+        if seed is not None:
+            env.reset(seed=seed + rank)
+        return env
+
+    return _init
 
 
 def main():
@@ -58,10 +95,22 @@ def main():
     )
     parser.add_argument(
         "--checkpoint-every", type=int, default=None,
-        help="Save an intermediate checkpoint every N timesteps to model/model_weights/checkpoints/, "
-             "matching waypoint_train.py's convention. Strongly recommended for any run -- per the "
-             "2026-08-09 waypoint finding, a regression can be invisible until the whole run finishes "
-             "if only the final save is ever evaluated."
+        help="Save an intermediate checkpoint every N *total* environment timesteps (summed across "
+             "all --n-envs parallel envs, not per-env) to model/model_weights/checkpoints/, matching "
+             "waypoint_train.py's convention. Strongly recommended for any run -- per the 2026-08-09 "
+             "waypoint finding, a regression can be invisible until the whole run finishes if only "
+             "the final save is ever evaluated."
+    )
+    parser.add_argument(
+        "--n-envs", type=int, default=1,
+        help="Number of parallel PyBullet environments (SB3 SubprocVecEnv), each in its own "
+             "process. This is the actual speedup lever for this workload -- PyBullet stepping in "
+             "a single process is the bottleneck, not GPU compute, for a network this small (see "
+             "ppo_policy.py's device='cpu' and the 2026-08-25 decision note). Pick a value below "
+             "your machine's core count (leave 1-2 cores free for the main process + OS); there's "
+             "no benefit past your core count since PyBullet stepping is CPU-bound. Default 1 "
+             "preserves the original single-process behavior exactly. Incompatible with --gui "
+             "(each sub-env would try to open its own PyBullet window) -- --gui forces this to 1."
     )
     parser.add_argument(
         "--init-from", type=str, default=None,
@@ -89,6 +138,11 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.gui and args.n_envs > 1:
+        print(f"--gui requested with --n-envs {args.n_envs}: forcing --n-envs to 1 "
+              f"(each parallel sub-env would otherwise try to open its own PyBullet window).")
+        args.n_envs = 1
+
     config = ProjectConfig()
     if args.gui:
         config.sim.gui = True
@@ -100,7 +154,11 @@ def main():
 
     tag = args.tag or args.stage
 
-    env = HoverGymEnv(config)
+    if args.n_envs > 1:
+        print(f"Building {args.n_envs} parallel PyBullet environments (SubprocVecEnv)...")
+        env = SubprocVecEnv([make_hover_env(config, args.seed, rank) for rank in range(args.n_envs)])
+    else:
+        env = HoverGymEnv(config)
 
     if args.init_from:
         # Warm-start: load the existing policy, attach it to this run's env.
@@ -110,12 +168,16 @@ def main():
         # them explicitly on `model` after load, same pattern
         # waypoint_train.py already established for its gamma/ent_coef
         # override (see config.py's waypoint_ppo_config() docstring).
+        # set_env() auto-wraps a raw (non-Vec) env in a DummyVecEnv+Monitor
+        # if needed, and leaves an already-vectorized SubprocVecEnv as-is --
+        # correct either way, same as build_ppo()'s explicit check below.
         model = PPO.load(args.init_from, device="cpu")
         model.set_env(env)
         if args.seed is not None:
             model.set_random_seed(args.seed)
     else:
-        # Note: build_ppo() wraps env in Monitor internally — don't double-wrap here.
+        # Note: build_ppo() wraps env in Monitor internally for the single-env
+        # case only -- see its VecEnv check -- don't double-wrap here.
         model = build_ppo(env, config.ppo, tensorboard_log=str(HOVER_STABILIZE_TB_LOG_DIR), seed=args.seed)
 
     callback = None
@@ -125,8 +187,15 @@ def main():
             name_prefix = f"{name_prefix}_{tag}"
         checkpoint_dir = MODEL_WEIGHTS_DIR / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        # SB3's CheckpointCallback counts one _on_step() call per VECTORIZED
+        # step, i.e. once per args.n_envs environment-steps collected, not
+        # once per single-env step. Dividing here keeps --checkpoint-every's
+        # meaning ("every N total env timesteps") identical across n_envs
+        # values -- without this, checkpoints at n_envs=6 would land 6x less
+        # often than the flag says, silently.
+        save_freq = max(args.checkpoint_every // args.n_envs, 1)
         callback = CheckpointCallback(
-            save_freq=args.checkpoint_every,
+            save_freq=save_freq,
             save_path=str(checkpoint_dir),
             name_prefix=name_prefix,
         )
