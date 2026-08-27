@@ -136,6 +136,27 @@ def main():
              "--stage is given and --tag isn't. Prevents sub-stage runs from clobbering each other's "
              "canonical save path."
     )
+    parser.add_argument(
+        "--ent-coef", type=float, default=None,
+        help="Override the entropy coefficient on the constructed model. Added 2026-08-25: "
+             "hover_stabilize_ppo_seed0_disturbance_3x5.zip's std climbed for a full 500k-step run "
+             "(1.15->1.49) instead of settling, and the checkpoint-sweep eval showed crash rate "
+             "plateaued/regressed over the same window -- same signature as the 2026-08-09 waypoint-nav "
+             "finding (entropy pull winning over a weak/ambiguous gradient). REQUIRED to actually take "
+             "effect on a --init-from run: PPO.load() restores ent_coef from the checkpoint file "
+             "itself, not from this run's PPOConfig, so without this flag a warm-started run silently "
+             "keeps whatever ent_coef the parent checkpoint was trained with no matter what config.py "
+             "says. Try 0.003 (down from the 0.01 default) as a first move, matching the waypoint fix's "
+             "direction, not necessarily its exact value -- hover's task/reward shape differs."
+    )
+    parser.add_argument(
+        "--gamma", type=float, default=None,
+        help="Override the discount factor on the constructed model, same mechanism/reasoning as "
+             "--ent-coef above (REQUIRED on --init-from to actually take effect, for the same reason). "
+             "The waypoint fix paired ent_coef 0.01->0.003 with gamma 0.99->0.995 -- worth trying "
+             "together rather than isolating one, since they were changed together there too and it's "
+             "not established which one (or the combination) mattered."
+    )
     args = parser.parse_args()
 
     if args.gui and args.n_envs > 1:
@@ -186,6 +207,23 @@ def main():
         # Note: build_ppo() wraps env in Monitor internally for the single-env
         # case only -- see its VecEnv check -- don't double-wrap here.
         model = build_ppo(env, config.ppo, tensorboard_log=str(HOVER_STABILIZE_TB_LOG_DIR), seed=args.seed)
+
+    if args.ent_coef is not None or args.gamma is not None:
+        # Set directly on the live model, not just config.ppo -- SB3's PPO
+        # reads self.ent_coef/self.gamma fresh every train() call, so this
+        # takes effect immediately regardless of which path built `model`
+        # above. This is the ONLY way to change these on a --init-from run:
+        # PPO.load() already restored the checkpoint's own values into these
+        # same attributes, ignoring config.ppo entirely -- see --ent-coef's
+        # help text. Also mirror into config.ppo so record_run() below logs
+        # what this run actually trained with, not the stale config default.
+        if args.ent_coef is not None:
+            model.ent_coef = args.ent_coef
+            config.ppo.ent_coef = args.ent_coef
+        if args.gamma is not None:
+            model.gamma = args.gamma
+            config.ppo.gamma = args.gamma
+        print(f"Overrode model hyperparameters: ent_coef={model.ent_coef}, gamma={model.gamma}")
 
     callback = None
     if args.checkpoint_every:
