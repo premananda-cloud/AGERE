@@ -79,6 +79,14 @@ def run_episode(env: HoverGymEnv, model: PPO, seed=None) -> dict:
     truncation_reason = None
     pos_error_trace = []  # per-step, so tail episodes can be told apart:
                           # "never converged" vs. "converged then drifted"
+    tilt_trace = []  # per-step max(|roll|, |pitch|) -- obs[6]/obs[7] are
+                      # already roll/pitch (see HoverGymEnv._obs_from_state),
+                      # so this needs no gym-wrapper changes. Added for the
+                      # tilt-criterion diagnostic (2026-08-25): checks whether
+                      # "crash" (tilt truncation, zero hold-time) episodes are
+                      # momentary spikes that would have self-corrected, vs.
+                      # genuine sustained loss of control -- see
+                      # hover_tilt_diagnostic.py.
 
     disturbance_fired = False
     disturbance_type = None
@@ -95,6 +103,7 @@ def run_episode(env: HoverGymEnv, model: PPO, seed=None) -> dict:
         total_reward += reward
         final_pos_error = info["position_error_norm"]
         pos_error_trace.append(final_pos_error)
+        tilt_trace.append(float(max(abs(obs[6]), abs(obs[7]))))  # obs[6]=roll, obs[7]=pitch (radians)
         if info.get("disturbance_fired"):
             disturbance_fired = True
             disturbance_type = info.get("disturbance_type")
@@ -115,6 +124,7 @@ def run_episode(env: HoverGymEnv, model: PPO, seed=None) -> dict:
         "jitter_norm": jitter_norm,
         "start_yaw_rad": start_yaw_rad,
         "pos_error_trace": pos_error_trace,
+        "tilt_trace": tilt_trace,
         "truncation_reason": truncation_reason,
         "disturbance_fired": disturbance_fired,
         "disturbance_type": disturbance_type,
