@@ -19,10 +19,21 @@ from src.environments.drone_sim import DroneSim
 class HoverGymEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, config: ProjectConfig | None = None):
+    def __init__(self, config: ProjectConfig | None = None, forced_disturbance: dict | None = None):
         super().__init__()
         self.config = config or ProjectConfig()
         self.task = self.config.task
+        # Demo-only override (2026-08-25): bypasses the normal random
+        # type/level/magnitude sampling in _sample_disturbance_event() so a
+        # specific case can be reproduced on demand -- e.g. reliably
+        # triggering "kick L4" to inspect the late-episode instability
+        # pattern flagged in training-log.md instead of waiting for a
+        # random draw to land on it. None (default) preserves normal
+        # training/eval sampling behavior unchanged. Keys: "type" (required,
+        # one of DISTURBANCE_TYPES), "level" (optional, else random 1-5),
+        # "magnitude" (optional, else sampled within the level's range),
+        # "onset_step" (optional, else sampled within the normal window).
+        self._forced_disturbance = forced_disturbance
 
         self.sim = DroneSim(self.config.sim)
 
@@ -82,6 +93,8 @@ class HoverGymEnv(gym.Env):
         Returns None if disturbance is disabled or no type/window is
         available this episode.
         """
+        if self._forced_disturbance is not None:
+            return self._build_forced_disturbance_event()
         if not getattr(self.task, "disturbance_enabled", False):
             return None
 
@@ -117,6 +130,52 @@ class HoverGymEnv(gym.Env):
         if lo_step >= hi_step:
             return None
         onset_step = int(self.np_random.integers(lo_step, hi_step + 1))
+
+        return {
+            "type": type_name,
+            "level": level,
+            "magnitude": magnitude,
+            "direction": direction,
+            "onset_step": onset_step,
+            "duration_steps": type_cfg.duration_steps,
+            "end_step": onset_step + type_cfg.duration_steps - 1,
+        }
+
+    def _build_forced_disturbance_event(self) -> dict:
+        """Build a disturbance event from self._forced_disturbance instead
+        of random sampling -- see __init__'s docstring for the accepted
+        keys. Unset optional keys (level/magnitude/onset_step) still get
+        randomized the normal way, so e.g. forcing only "type": "kick"
+        gives a random level/magnitude/onset each episode, same variety
+        as normal sampling, just restricted to one type.
+        """
+        forced = self._forced_disturbance
+        type_name = forced["type"]
+        type_cfg = DISTURBANCE_TYPES[type_name]
+
+        level = forced.get("level")
+        if level is None:
+            level = int(self.np_random.integers(1, DISTURBANCE_LEVELS + 1))
+
+        magnitude = forced.get("magnitude")
+        if magnitude is None:
+            lo, hi = type_cfg.level_bounds[level - 1], type_cfg.level_bounds[level]
+            magnitude = float(self.np_random.uniform(lo, hi))
+        else:
+            magnitude = float(magnitude)
+
+        direction = self.np_random.normal(size=3)
+        norm = np.linalg.norm(direction)
+        direction = direction / norm if norm > 1e-6 else np.array([1.0, 0.0, 0.0])
+
+        onset_step = forced.get("onset_step")
+        if onset_step is None:
+            lo_step = self.task.disturbance_kick_step_min
+            hi_step = min(
+                self.task.disturbance_kick_step_max,
+                self._max_steps - 1 - type_cfg.duration_steps - self.task.recovery_hold_steps,
+            )
+            onset_step = int(self.np_random.integers(lo_step, hi_step + 1)) if lo_step < hi_step else lo_step
 
         return {
             "type": type_name,
