@@ -56,6 +56,9 @@ class HoverGymEnv(gym.Env):
         self._recovery_time_steps: int | None = None
         self._disturbance_fired = False
         self._wind_errors_during_window: list[float] = []
+        # Sustained-tilt crash tracking (2026-08-25 fix) -- see
+        # config.py's max_tilt_hold_steps docstring for why this exists.
+        self._tilt_breach_counter = 0
 
     def _sample_disturbance_event(self) -> dict | None:
         """Sample this episode's single disturbance event: which of the 3
@@ -157,16 +160,27 @@ class HoverGymEnv(gym.Env):
         Distinguishing "crash" (out_of_bounds/tilt) from "timeout" matters
         for evaluation — see docs/hover-model-plan.md Stage 2, which
         requires <10% crash rate specifically, not just "episode ended."
+
+        Tilt uses self._tilt_breach_counter (updated in step(), BEFORE this
+        is called) rather than an instantaneous roll/pitch check -- requires
+        max_tilt_hold_steps CONSECUTIVE steps over the line, not a single
+        momentary touch. See config.py's max_tilt_hold_steps docstring:
+        hover_tilt_diagnostic.py found the old single-step check was
+        truncating legitimate hard-tilt recovery maneuvers (68% of
+        tilt-truncated episodes recovered cleanly when just given room),
+        not catching real crashes. out_of_bounds/altitude remain
+        single-step checks deliberately -- there's no equivalent "brief
+        excursion that self-corrects" case for physically leaving the
+        bounded volume the way there is for a transient tilt spike.
         """
         x, y = state.position[0], state.position[1]
-        roll, pitch = state.orientation_rpy[0], state.orientation_rpy[1]
         if (
             abs(x) > self.task.max_xy_distance
             or abs(y) > self.task.max_xy_distance
             or state.position[2] > self.task.max_altitude
         ):
             return "out_of_bounds"
-        if abs(roll) > self.task.max_tilt_rad or abs(pitch) > self.task.max_tilt_rad:
+        if self._tilt_breach_counter >= self.task.max_tilt_hold_steps:
             return "tilt"
         if self._step_count >= self._max_steps:
             return "timeout"
@@ -201,6 +215,7 @@ class HoverGymEnv(gym.Env):
         self._recovery_time_steps = None
         self._disturbance_fired = False
         self._wind_errors_during_window = []
+        self._tilt_breach_counter = 0
 
         obs = self._obs_from_state(state)
         # Exposed so callers (evaluate.py's tail diagnostics, in particular)
@@ -273,6 +288,16 @@ class HoverGymEnv(gym.Env):
                 self._recovery_hold_counter = 0  # violation resets the streak, same
                                                    # non-momentary-touch pattern as
                                                    # landing_hold_time_sec elsewhere
+
+        # Update sustained-tilt breach counter BEFORE checking truncation,
+        # so _truncation_reason() sees this step's value. Uses `state`
+        # (world-frame roll/pitch), not `obs` (which holds yaw_error, not
+        # raw yaw, in that slot) -- see _obs_from_state().
+        tilt_now = max(abs(state.orientation_rpy[0]), abs(state.orientation_rpy[1]))
+        if tilt_now > self.task.max_tilt_rad:
+            self._tilt_breach_counter += 1
+        else:
+            self._tilt_breach_counter = 0
 
         reason = self._truncation_reason(obs, state)
         truncated = reason is not None

@@ -146,6 +146,29 @@ class HoverTaskConfig:
     max_xy_distance: float = 1.5  # meters from origin, x or y
     max_altitude: float = 2.0  # meters
     max_tilt_rad: float = 0.4  # roll or pitch, radians (~23 degrees)
+    # ADDED 2026-08-25, tilt-criterion diagnostic: the ORIGINAL check was a
+    # single-step "exceed 0.4 rad -> instant crash," with no hold-time --
+    # asymmetric with recovery_hold_steps below, which requires 60 SUSTAINED
+    # steps under threshold precisely because a momentary touch isn't real
+    # recovery. hover_tilt_diagnostic.py found 68% of tilt-truncated episodes
+    # (mostly kick, up to 55deg peak tilt) recovered cleanly to a good final
+    # position error when simply given room to keep flying -- i.e. the
+    # single-step check was truncating legitimate hard-tilt recovery
+    # maneuvers, not catching real crashes. Only 12% (all torque L5, peak
+    # tilt 72-75deg -- a real qualitative jump, not just "a bit higher")
+    # were genuine sustained loss of control. This field requires tilt to
+    # exceed max_tilt_rad for N CONSECUTIVE steps before truncating, mirroring
+    # recovery_hold_steps's own non-momentary-touch principle instead of
+    # fighting it. Value is a first guess (0.2s @ 30Hz ctrl_freq) sized to
+    # catch the observed genuine-crash cases (which reached 70+ degrees,
+    # implying several steps of sustained climb past the line already) while
+    # giving a one-step corrective spike room to pass -- NOT yet re-validated
+    # with its own diagnostic pass the way the magnitude levels were; worth
+    # rerunning hover_tilt_diagnostic.py after this ships to confirm genuine
+    # crashes still get caught quickly rather than ballooning xy/altitude
+    # drift before truncating (max_xy_distance/max_altitude remain an
+    # independent backstop either way, unaffected by this field).
+    max_tilt_hold_steps: int = 6
 
     # Reward shaping weights
     position_error_weight: float = 1.0
