@@ -883,3 +883,224 @@ Decision: do not promote any 1a checkpoint as a new champion. Proceed to
 not from any 1a checkpoint, since 1a training added no verified value to
 warm-start from. Revise the plan doc's magnitude levels before running 1b
 -- see below.
+
+## Superseding decision, 2026-08-25: 3-type/5-level scoped design replaces the 1a/1b/1c/... roadmap
+
+The strict sequential sub-stage curriculum above (1a -> 1b -> 1c -> ...)
+is superseded, not continued. See
+`docs/architecture/hover-disturbance-3x5-design.md` for the full design
+and rationale. Summary: 3 disturbance types (kick, torque, wind) x 5
+magnitude levels each, one event sampled per episode (type uniform,
+level uniform 1-5), trained together in one run rather than staged
+narrow presets one at a time -- directly motivated by 1a's null result
+above (a single narrow preset can burn a full run with zero learning
+signal; sampling the whole scoped space at once avoids repeating that).
+Kick's magnitude floor was corrected up from 1a's confirmed-too-weak
+0.1-0.3 m/s to 0.3-0.5 m/s at L1. Torque and wind level bounds are
+first-guess estimates, not yet independently validated the way kick's
+were.
+
+Takeoff and landing are explicitly out of scope for this push --
+scripted, not learned, decided separately from the disturbance work.
+
+### Run 2026-08-25-0 — hover_stabilize_ppo_seed0_disturbance_3x5, first 3x5 run, 500k steps (superseded by bug fix below)
+
+From hover_champion.zip, single-process (pre-parallelization), --stage
+disturbance_3x5. Hash `706fcaceb85a...`.
+
+Eval (90 episodes, --stage disturbance_3x5): overall crash 33.3%. Kick
+crash rate climbed cleanly with level (0%/33%/83%/50%/100%) -- a real,
+well-calibrated difficulty ramp, unlike 1a. Torque similar shape
+(0%/0%/33%/67%/75%). **Wind numbers were bogus**: recovery read as low as
+12% at L5 despite in-window steady-state error staying under 0.06m the
+whole time -- a bug, not a real finding (see below).
+
+### Bug found + fixed, 2026-08-25 — wind recovery window didn't fit inside the episode
+
+`WIND_CONFIG.duration_steps=90` (~3s) combined with the shared
+`[60,150]`-step onset window and `recovery_hold_steps=60` meant a wind
+window ending late in that range left no room for the required 60-step
+recovery hold before the 240-step (8s) episode ended -- recovery was
+**structurally impossible** for a large fraction of episodes regardless
+of policy quality. Fixed two ways: `duration_steps` 90->60 in
+`config.py`, and `hover_gym_wrapper.py`'s onset-window clamp now
+subtracts `recovery_hold_steps` too, not just the event's own duration
+-- so this class of bug can't recur for any future type/duration/window
+combination.
+
+### Infra, 2026-08-25 — parallel training (`--n-envs`) added
+
+PyBullet stepping in a single process, not GPU compute, is the actual
+bottleneck for this workload (tiny `[64,64]` MLP) -- confirmed this
+rather than assumed it before adding GPU support. Added `--n-envs` to
+`hover_train.py` (SB3 `SubprocVecEnv`, one PyBullet instance per
+process). `ppo_policy.py`'s `build_ppo` now skips its internal
+`Monitor`-wrap when given an already-vectorized env. `--checkpoint-every`
+divides by `n_envs` internally (SB3's callback fires once per vectorized
+step, not once per single-env step -- easy to get silently wrong).
+Measured ~2600 fps at `--n-envs 6` vs. single-process baseline.
+
+Two warm-start bugs surfaced and fixed while wiring this up:
+- `PPO.load(path); model.set_env(vec_env)` raises `AssertionError` if the
+  checkpoint's own `n_envs` (always 1 for anything trained before this)
+  doesn't match the new env's count. Fixed: `PPO.load(path, env=vec_env)`
+  instead, which re-initializes rollout buffers against the given env
+  rather than asserting they match.
+- `hover_champion.zip` was missing after moving to a new machine
+  (WSL/`DESKTOP-5B0JLP7`, migrated from `debian` via HuggingFace
+  upload/download) -- large model weights aren't in git, don't come
+  along with a plain clone. Not a code bug, but cost a debugging cycle
+  before being recognized as a missing-file problem, not a `.zip.zip`
+  path-construction bug (SB3's loader's own fallback-suffix behavior
+  made the real error message misleading).
+
+### Run 2026-08-25-1 — hover_stabilize_ppo_seed0_disturbance_3x5, wind-fixed + parallel (--n-envs 6), 500k steps
+
+From hover_champion.zip (same parent as Run 2026-08-25-0 -- this
+restarted disturbance training from the undisturbed baseline again, not
+building on 2026-08-25-0's steps), `--n-envs 6`, wind bug fix in place.
+Hash `3df3deb1a99f...`.
+
+Eval (90 episodes): overall crash 33.3% (same aggregate as
+2026-08-25-0's pre-fix run, coincidentally -- composition shifted: kick
+50% (was 58%), torque 54% (was 41%, got worse), **wind 0% crash / 100%
+recovery all 5 levels -- fully mastered, fix confirmed working.**
+`train/std` climbed the entire run (1.15->1.49) instead of settling --
+flagged as a live concern, not yet acted on.
+
+### Diagnostic, 2026-08-25 — checkpoint sweep tool built (`hover_checkpoint_sweep.py`)
+
+Re-evaluates every checkpoint from one run under an identical seeded
+condition (same start/disturbance draw sequence per checkpoint), to
+measure whether a run is still improving or has plateaued from actual
+task performance rather than inferring it from `train/std`/`approx_kl`
+alone. Verdict: compares trailing-3-checkpoint mean crash rate against
+the previous 3; >3pp improvement = "still learning," else "plateaued."
+
+Swept Run 2026-08-25-1's own 10 checkpoints (50k-500k, seed=0, 60
+episodes each): **PLATEAUED**, trailing window (300k-500k) mean crash
+33.3% vs. prior window (150k-300k... actually the two nearest 3-checkpoint
+windows) mean crash rate essentially flat/regressed, -4.4pp "improvement."
+
+### Run 2026-08-25-2 — ent_coef/gamma fix + continued training, 500k steps
+
+Hypothesis: `train/std` never stopped climbing across 2026-08-25-1
+because `ent_coef` (0.01 default) never adapted across ~1M cumulative
+disturbance-training steps -- every warm-start went through `PPO.load()`,
+which restores hyperparameters from the checkpoint file itself, ignoring
+`config.py`. Same failure signature as the 2026-08-09 waypoint-nav
+finding (entropy pull winning over a weak gradient), fixed there by
+lowering `ent_coef`/raising `gamma`. Added `--ent-coef`/`--gamma` flags
+to `hover_train.py` that set the value directly on the live model object
+post-construction (`config.ppo` alone doesn't reach a warm-started
+model). Ran 500k more steps from 2026-08-25-1's checkpoint with
+`--ent-coef 0.003 --gamma 0.995`.
+
+Checkpoint sweep verdict: **still PLATEAUED** -- trailing window
+(450k-500k window) mean crash 37.2% vs. prior 36.7%, -0.6pp. The
+hyperparameter fix alone did not resolve it. Torque got noticeably worse
+at the final checkpoint specifically (33%->56% between adjacent 50k
+checkpoints) -- flagged as possibly small-sample noise (n~4-8 per
+type/level bucket at 60 total eval episodes), not confirmed.
+
+### Diagnostic, 2026-08-25 — tilt-criterion diagnostic (`hover_tilt_diagnostic.py`): the crash check itself was the bottleneck
+
+Two consecutive interventions (raw continued training, then the
+ent_coef/gamma fix) landing at the same ~37% crash rate pointed at a
+structural ceiling rather than an undertrained policy. Candidate:
+`max_tilt_rad=0.4` rad (~23deg) was checked with **zero hold-time** -- a
+single momentary breach ended the episode permanently, unlike
+`recovery_hold_steps` elsewhere in this codebase, which requires 60
+*sustained* steps under threshold specifically because a momentary touch
+isn't real recovery. No equivalent grace existed in the crash direction.
+
+Method: re-ran eval with `max_tilt_rad` loosened to 1.2 rad (~69deg,
+diagnostic-only, not a training config change) and classified every
+episode that crossed the *real* 0.4 rad line: did it settle back down
+and finish cleanly (criterion was the artifact), or genuinely keep
+diverging (real capability ceiling)?
+
+**Result: 68% (17/25) recovered cleanly once given room** -- mostly
+kick, peak tilt up to 55deg, final position error as low as 0.017m.
+**Only 12% (3/25) were genuine loss of control** -- all torque L5
+(9-10 rad/s), peak tilt 72-75deg, a real qualitative jump from the
+recovered group, not just "a bit higher." 20% ambiguous (mostly torque
+L3-L4, settled but with poor final position error).
+
+Conclusion: the crash *criterion*, not the policy, was the dominant
+cause of the two-run plateau. Also explains why the ent_coef/gamma fix
+didn't help -- the training signal itself was corrupted by false-positive
+crash penalties on cases that were actually fine, independent of policy
+entropy.
+
+### Fix, 2026-08-25 — sustained-hold tilt criterion (`max_tilt_hold_steps`)
+
+Mirrors `recovery_hold_steps`'s own non-momentary-touch principle,
+applied in the crash direction: tilt must exceed `max_tilt_rad` for
+`max_tilt_hold_steps` (new field, default 6 steps / ~0.2s @ 30Hz)
+*consecutive* steps before truncating, not a single-step check.
+`out_of_bounds`/altitude remain single-step checks deliberately -- no
+equivalent "brief excursion that self-corrects" case exists for
+physically leaving the flight volume. `max_tilt_hold_steps=6` is a first
+guess (sized to pass a one-step corrective spike while still catching
+the observed genuine-crash cases, which reached 70+ degrees implying
+several steps of sustained climb already) -- **not yet independently
+validated with its own diagnostic pass** the way kick's magnitude levels
+were.
+
+Re-evaluating the EXACT SAME checkpoint from Run 2026-08-25-2 (no
+retraining) under the corrected criterion: crash rate dropped from
+~37% to **23.3% (21/90)**, hash `9694bdcd86ea...`, purely from the
+criterion fix. Wind stayed perfect. Torque L1-L3 now read 0% crash
+(previously showed crashes even at low levels) -- newly fully mastered.
+Torque L4/L5 and kick L3-L5 remain genuinely problematic even under the
+corrected criterion (~48% kick crash rate) -- these are real, not
+artifacts. Notable new pattern: most remaining kick crashes now happen
+well AFTER the drone visibly recovered from the disturbance (e.g. best
+position error 0.001-0.03m mid-episode, crash 10-40 steps later with no
+new disturbance event) -- looks like a late, separate marginal-stability
+issue distinct from the initial-recovery phase, not yet investigated
+further.
+
+### Run 2026-08-25-3 — hover_stabilize_ppo_seed0_disturbance_3x5_tiltfix, 500k steps (first run under corrected criterion)
+
+From the 9694bdcd86ea checkpoint (ent_coef/gamma-fixed, old tilt
+criterion), `--ent-coef 0.003 --gamma 0.995` (re-applied), `--n-envs 6`,
+new tag `disturbance_3x5_tiltfix` (first run to use a distinct tag
+rather than overwriting `disturbance_3x5` in place -- kept so this and
+prior checkpoints stay separately comparable).
+
+Checkpoint sweep (10 checkpoints, 50k-500k, seed=0, 60 episodes each):
+**STILL IMPROVING**, +5.6pp (trailing window 20.0% vs. prior 25.6%).
+Kick showed a real (noisy but directional) downtrend across the run:
+50%->55%->45%->35%->55%->45%->40%->45%->40%->25%, ending well below the
+~48% pre-tiltfix baseline. Torque stayed flatter/noisier (17-39%, no
+clear trend) -- next thing to watch. Wind stayed perfect throughout.
+
+This is the first run where more training steps produced a real,
+reproducible improvement on kick/torque -- unlike Runs 2026-08-25-1 and
+2026-08-25-2, both of which plateaued. Consistent with the tilt-criterion
+diagnostic's conclusion: the earlier plateaus were very likely measuring
+a corrupted training signal, not a real capability ceiling.
+
+### Run 2026-08-25-4 — hover_stabilize_ppo_seed0_disturbance_3x5_tiltfix2, 500k steps
+
+From `..._tiltfix.zip`'s final save (no `--ent-coef`/`--gamma` reapplied
+-- already baked into the checkpoint from the previous run, confirmed
+`PPO.save()` persists live hyperparameter values). `--n-envs 6`. Hash
+`bbc4335cb6ea...`.
+
+Checkpoint sweep: **STILL IMPROVING**, +3.3pp (trailing window 20.6% vs.
+prior 23.9%). Final checkpoint (499,980 steps): crash 20.0%, kick 35%,
+torque 28%, wind 0%. Best single checkpoint in this run was 449,982 steps
+(18.3% crash, kick 35%, torque 22%) -- final save is not automatically
+best, same pattern as every prior baseline in this project; worth an
+eval-based champion pick from checkpoints, not just trusting the final
+save, once this line of training is considered done.
+
+**Current status, end of 2026-08-25 session:** overall crash rate has
+gone from ~37-40% (pre-tiltfix plateau) to ~18-23% across two
+tiltfix-line runs, with wind fully mastered and torque L1-L3 fully
+mastered. Still improving; still short of the <10% mastery gate defined
+in `hover-robustness-curriculum-plan.md`. Not yet at a stopping point --
+see `docs/status.md` for the current open-items list and next action.

@@ -145,6 +145,20 @@ Only the top-level training-loop scripts (`hover_train.py`,
 subfolder, since they don't have further per-task variants the way
 evaluate/demo do.
 
+The "disturbance-recovery testing for hover" variant mentioned above is
+no longer hypothetical as of 2026-08-25: `evaluate/` now also holds
+`hover_checkpoint_sweep.py` (re-evaluates a run's own checkpoint series
+under an identical seeded condition to measure whether training is still
+improving or has plateaued) and `hover_tilt_diagnostic.py` (checks
+whether an episode's crash was genuine loss of control or a truncation-
+criterion artifact, by temporarily loosening the tilt bound for the eval
+pass only). Both import and reuse `hover_evaluate.py`'s `run_episode()`
+rather than duplicating episode logic — a second instance of the same
+"shared core, task/purpose-specific file" pattern this section already
+describes for `gym_wrapper/`/`evaluate/`/`demo/` generally, one level
+down: multiple *evaluation* variants for one task, not just one eval
+file per task.
+
 ## A rule of thumb for "where does this code go?"
 
 Ask: **does this fact stay true even if we swapped PPO for SAC, or changed
