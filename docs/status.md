@@ -409,46 +409,103 @@ its checkpoint weights are deleted (see "What this project is" at top).
 - `waypoint_demo.py` — was broken (duplicate of `waypoint_evaluate.py`),
   never fixed. Moot now.
 
-### Current open items (hover, active as of 2026-08-16)
+### Current open items (hover, active as of 2026-08-25)
 
-- **Sub-stage 1a's magnitude range (0.1–0.3 m/s) is confirmed too low to
-  teach anything** — the untouched Stage 0 champion already passes 1a's
-  mastery gate with zero disturbance-specific training (see
-  `training-log.md` Run 2026-08-16-1, `theory-log.md` Theory
-  2026-08-16-3). Next step: a single manual eval at ~0.4–0.5 m/s against
-  the untouched champion to find where its baseline competence actually
-  breaks, before choosing revised magnitude numbers for the curriculum.
-  Not yet done.
-- Two still-unexplained crash-rate blips exist in the hover data:
-  Stage 0's 250k–350k window (overcorrection hypothesis tested and
-  **refuted** via `train/std`, mechanism still unknown — Theory
-  2026-08-16-0/1) and 1a's 300k checkpoint specifically (10% crash,
-  every neighboring checkpoint 0% — Theory 2026-08-16-2, not yet
-  confirmed as real vs. sampling noise; a `--seed 7` rerun would settle
-  it, not yet done).
+**Superseded, for context:** the 1a/1b/1c/... sub-stage roadmap below
+this section (and in `hover-robustness-curriculum-plan.md`) was replaced
+2026-08-25 by a 3-type/5-level scoped design (kick/torque/wind x 5
+magnitude levels, one event/episode, trained together rather than
+staged) — see `docs/architecture/hover-disturbance-3x5-design.md` and
+`training-log.md`'s 2026-08-25 entries for the full history. The 1a
+null-result finding directly motivated that redesign. Takeoff/landing
+are scripted, not learned, and explicitly out of scope for this push.
+
+- **Two training runs (`disturbance_3x5`, then +ent_coef/gamma fix)
+  plateaued at ~37% crash rate; root cause turned out to be the crash
+  criterion itself, not the policy.** `max_tilt_rad` was checked with
+  zero hold-time — a momentary corrective tilt (e.g. redirecting thrust
+  to arrest a kick) was scored identically to genuine loss of control.
+  Diagnostic (`hover_tilt_diagnostic.py`) found 68% of tilt-truncated
+  episodes recovered cleanly when just given room to keep flying. Fixed
+  via `max_tilt_hold_steps` (sustained-hold check, mirroring
+  `recovery_hold_steps`'s existing non-momentary-touch pattern). Crash
+  rate on the same checkpoint dropped from ~37% to 23% from the fix
+  alone, before any retraining.
+- **`max_tilt_hold_steps=6` is a first guess, not independently
+  validated** the way the magnitude levels were — worth its own
+  diagnostic pass (rerun `hover_tilt_diagnostic.py` against a current
+  checkpoint) if crash numbers look off in either direction later.
+- **Torque and wind's magnitude level bounds are unvalidated
+  estimates** (wind scaled against hover thrust, torque has no
+  real-world reference at all) — kick's floor was corrected once
+  already (1a's 0.1–0.3 m/s confirmed too weak); torque/wind haven't
+  been checked the same way yet. Wind turned out fine empirically
+  (0% crash, 100% recovery all 5 levels once its own timing bug was
+  fixed) but that's not the same as the magnitude scale being right —
+  it may just mean wind is comfortably within the recoverable envelope
+  at every level tested.
+- **Training is still actively improving as of the last two runs**
+  (`disturbance_3x5_tiltfix`, `disturbance_3x5_tiltfix2` — +5.6pp and
+  +3.3pp per the checkpoint-sweep tool's trailing-window comparison),
+  crash rate now ~18–23%, still short of the <10% mastery gate. Wind
+  and torque L1–L3 are fully mastered (0% crash); kick L3–L5 and torque
+  L4–L5 remain the open problem.
+- **A late-episode instability pattern in kick specifically**: several
+  crashing episodes show excellent recovery (position error near zero)
+  followed by a NEW tilt excursion many steps later, with no further
+  disturbance event in that episode. Looks like a separate
+  marginal-stability issue distinct from initial-kick recovery — not
+  yet investigated (candidate next thread once the current training
+  line plateaus for real).
+- **Parallel training (`--n-envs`, `SubprocVecEnv`) is now available**
+  in `hover_train.py` — ~2600 fps at `--n-envs 6` vs. single-process.
+  GPU was investigated and deliberately NOT adopted (PyBullet stepping
+  in a single process, not GPU compute, is this workload's actual
+  bottleneck for a network this small).
+- **A checkpoint-sweep tool exists**
+  (`src/training/evaluate/hover_checkpoint_sweep.py`) to measure
+  whether a run is still improving or has plateaued from actual
+  task-performance numbers, before committing to further training —
+  used to catch both plateaus above rather than guessing from
+  `train/std`/`approx_kl` alone.
+- Two still-unexplained crash-rate blips from before this session
+  remain unresolved and are now lower priority: Stage 0's 250k–350k
+  window (overcorrection hypothesis tested and **refuted**, mechanism
+  still unknown — Theory 2026-08-16-0/1) and 1a's 300k checkpoint blip
+  (likely noise, not confirmed — `--seed 7` rerun still not done, and
+  now moot given 1a's own checkpoints were never promoted).
 - A hover demo script exists (`src/training/demo/hover_demo.py`) but
-  hasn't been reviewed or extended to show the disturbance-recovery
-  behavior — in progress as of this update.
-- `hover_evaluate.py`'s `--stage` flag is required to see any disturbance
-  behavior at all; omitting it silently evaluates as if undisturbed
-  regardless of how the model was trained — easy to forget, worth double
-  -checking on any future eval command.
-- `checkpoint_manager.py`'s `backfill` command doesn't know about
-  `--stage` — disturbance-curriculum checkpoints need manual
-  `hover_evaluate.py --stage <X>` calls per checkpoint, not the
-  automated backfill loop. Not yet fixed.
+  hasn't been reviewed or extended to show disturbance-recovery
+  behavior — still not started.
+- `hover_evaluate.py`'s `--stage` flag is required to see any
+  disturbance behavior at all; omitting it silently evaluates as if
+  undisturbed regardless of how the model was trained — still easy to
+  forget, worth double-checking on any future eval command.
+- `checkpoint_manager.py`'s `backfill` command still doesn't know about
+  `--stage` — not fixed, same gap as before.
 
 ### Next action
 
-1. Find the real Level-1-equivalent floor: manual eval of
-   `hover_champion.zip` at ~0.4–0.5 m/s, no training, to calibrate where
-   the curriculum's actual starting difficulty should be.
-2. Revise `HOVER_STAGE_PRESETS["1a"]` (or introduce a new sub-stage) in
-   `config.py` with the corrected magnitude range once that number exists.
-3. Resolve or deprioritize the 300k crash-blip reproduction check
-   (`--seed 7` rerun) — cheap, but not blocking.
-4. See `docs/planning/hover-robustness-curriculum-plan.md` for the full
-   sub-stage roadmap (1a revised → 1b → 1c → 1d → 1e → 1f) beyond this.
+1. Continue the `disturbance_3x5_tiltfix2` training line while it's
+   still improving per the checkpoint sweep (+3.3pp on the last check) —
+   `--init-from` its final checkpoint, same `--n-envs 6`, sweep again
+   after ~300k steps before committing to the full run.
+2. Watch specifically for: (a) whether kick keeps closing the gap or
+   stalls again, (b) whether torque (currently flat/noisy, 17–39%
+   across the last full run) starts moving or becomes the new
+   bottleneck once kick catches up.
+3. Once this line plateaus for real (checkpoint sweep says so, not a
+   guess), investigate the late-episode kick instability pattern above
+   rather than immediately reaching for another hyperparameter change —
+   two hyperparameter-only attempts already failed to fix what turned
+   out to be a criterion bug; don't repeat that pattern on a genuinely
+   different problem without checking first.
+4. Validate `max_tilt_hold_steps=6` and the torque/wind magnitude
+   tables with their own diagnostic passes, same discipline already
+   applied to kick and to the tilt criterion itself — not yet done.
+5. Pick an eval-based champion from checkpoints once this line is
+   considered done, not the final save automatically — final save has
+   not been the best checkpoint in any run so far in this project.
 
 ---
 
@@ -476,15 +533,31 @@ its checkpoint weights are deleted (see "What this project is" at top).
 ## Other docs in this repo worth reading, in rough priority order
 
 **Current (hover), read these first:**
-1. `docs/planning/hover-robustness-curriculum-plan.md` — the active plan:
-   Stage 0 (done), Stage 1 disturbance curriculum design and sub-stage
-   roadmap
-2. `docs/research/theory-log.md` — dated hypothesis/interpretation log,
+1. `docs/architecture/hover-disturbance-3x5-design.md` — the ACTIVE
+   disturbance design (supersedes the 1a/1b/1c/... roadmap in the doc
+   below for anything past 2026-08-25): 3 types x 5 levels, scoping
+   rationale, what's validated vs. still a guess.
+2. `docs/planning/hover-robustness-curriculum-plan.md` — original plan;
+   still useful for the disturbance taxonomy and Stage 0's history, but
+   its sub-stage roadmap (1a onward) is superseded — see doc above.
+3. `docs/research/theory-log.md` — dated hypothesis/interpretation log,
    companion to training-log.md's raw results
-3. `docs/training-log.md` — living log; hover entries from 2026-08-16
+4. `docs/training-log.md` — living log; hover entries from 2026-08-16
    onward are current, everything before that predates the from-scratch
-   retrain and the tooling described above
-4. `src/model_registry.py` / `src/checkpoint_manager.py` — read their
+   retrain and the tooling described above. 2026-08-25 entries cover the
+   wind-timing bug, parallel training, the ent_coef/gamma dead end, and
+   the tilt-criterion fix that actually unblocked training — read that
+   whole sequence before assuming another hyperparameter tweak is the
+   answer to a plateau.
+5. `src/training/evaluate/hover_checkpoint_sweep.py` — measures whether
+   a run is still improving or has plateaued from real eval numbers
+   across a run's own checkpoints; use this before deciding to train
+   more OR to stop, rather than guessing from the training printout.
+6. `src/training/evaluate/hover_tilt_diagnostic.py` — checks whether a
+   "crash" was a real loss of control or an artifact of the (now fixed,
+   but re-check if it's ever loosened/tightened again) tilt-truncation
+   criterion.
+7. `src/model_registry.py` / `src/checkpoint_manager.py` — read their
    module docstrings for the champion-selection tooling now used for any
    task
 
