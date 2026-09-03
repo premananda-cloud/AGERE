@@ -1,0 +1,21 @@
+{
+  "model_path": "model/model_weights/hover_stabilize_ppo_seed0_disturbance_3x5_tiltfix2.zip",
+  "git_commit": "5890dc1",
+  "stage": "disturbance_3x5",
+  "episodes_per_bucket": 40,
+  "seed": 0,
+  "label": "tiltfix2_champion",
+  "generated_at_utc": "20260903T050703Z",
+  "n_episodes_total": 600,
+  "units_by_type": {
+    "kick": "m/s",
+    "torque": "rad/s",
+    "wind": "N"
+  },
+  "files": {
+    "raw_episodes_csv": "raw_episodes.csv",
+    "raw_episodes_full_jsonl": "raw_episodes_full.jsonl",
+    "summary_csv": "summary_by_type_level.csv",
+    "figures_dir": "figures/"
+  }
+}
