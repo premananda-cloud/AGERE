@@ -40,7 +40,7 @@ from stable_baselines3 import PPO
 from src.config import ProjectConfig, WaypointTaskConfig
 from src.paths import waypoint_model_path
 from src.training.gym_wrapper.waypoint_gym_wrapper import WaypointGymEnv
-from src.model_registry import record_eval, file_hash, find_run
+from src.weight_manager.model_registry import record_eval, file_hash, find_run
 
 
 def run_episode(env: WaypointGymEnv, model: PPO, seed=None):
@@ -126,7 +126,7 @@ def main():
         "--no-tag", action="store_true",
         help="Skip logging this eval to the model registry (model/model_weights/registry.jsonl). "
              "Default is to always tag, keyed by the evaluated file's content hash -- this is what "
-             "lets 'which checkpoint got 3.00/5' be answered by 'python -m src.model_registry best' "
+             "lets 'which checkpoint got 3.00/5' be answered by 'python -m src.weight_manager.model_registry best' "
              "instead of reconstructing it from devlogs. Use --no-tag for quick throwaway checks "
              "you don't want cluttering the registry (e.g. a --gui sanity watch of 1-2 episodes)."
     )
@@ -202,7 +202,7 @@ def main():
             },
         )
         print(f"Logged to model registry (hash {h[:12]}...). "
-              f"Query with: python -m src.model_registry describe {model_path}\n")
+              f"Query with: python -m src.weight_manager.model_registry describe {model_path}\n")
 
     # --- Failure breakdown ---------------------------------------------
     # Where episodes are failing matters more than the success rate alone

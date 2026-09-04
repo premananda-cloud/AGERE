@@ -4,16 +4,18 @@ crash-rate spike in the hover from-scratch run corresponds to elevated
 train/std (action distribution spread) -- i.e. an aggressive/high-variance
 correction phase, not some other mechanism.
 
-Usage:
-    python check_std_window.py                    # lists all runs + their step ranges
-    python check_std_window.py --run PPO_7         # inspects one run's std curve
+Usage (run from the repo root, so the `src.paths` import resolves):
+    python -m src.weight_manager.check_std_window                # lists all runs + their step ranges
+    python -m src.weight_manager.check_std_window --run PPO_7     # inspects one run's std curve
 """
 import argparse
 from pathlib import Path
 
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
-HOVER_LOGS = Path("tb_logs/hover_logs")
+from src.paths import HOVER_STABILIZE_TB_LOG_DIR
+
+HOVER_LOGS = HOVER_STABILIZE_TB_LOG_DIR
 
 
 def load_scalar(run_dir: Path, tag: str):

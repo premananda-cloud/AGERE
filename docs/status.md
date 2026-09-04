@@ -26,7 +26,7 @@ the "Task 2" section further down is now historical, not current.**
   below, kept as historical record). Checkpoint files deliberately
   deleted from disk; all eval/training history preserved permanently in
   `model/model_weights/registry.jsonl` (`task=waypoint_nav`), queryable
-  via `python -m src.checkpoint_manager leaderboard waypoint_nav
+  via `python -m src.weight_manager.checkpoint_manager leaderboard waypoint_nav
   mean_waypoints_reached` even though the weights themselves are gone.
 
 **New tooling since 2026-08-13**, not reflected anywhere below except

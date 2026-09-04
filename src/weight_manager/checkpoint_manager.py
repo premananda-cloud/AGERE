@@ -32,12 +32,12 @@ yet, add it there first (mirror whatever waypoint_evaluate.py already does) --
 backfill here just invokes the command, it doesn't register results on its own.
 
 CLI:
-    python -m src.checkpoint_manager leaderboard <task> <metric> [--minimize]
-    python -m src.checkpoint_manager backfill <task> [--seed N] [--episodes N]
-    python -m src.checkpoint_manager promote <task> <metric> [--minimize]
-    python -m src.checkpoint_manager archive <task> --keep <hash-prefix-or-champion>
-    python -m src.checkpoint_manager retire-task <task>
-    python -m src.checkpoint_manager restore <archive_manifest.json>
+    python -m src.weight_manager.checkpoint_manager leaderboard <task> <metric> [--minimize]
+    python -m src.weight_manager.checkpoint_manager backfill <task> [--seed N] [--episodes N]
+    python -m src.weight_manager.checkpoint_manager promote <task> <metric> [--minimize]
+    python -m src.weight_manager.checkpoint_manager archive <task> --keep <hash-prefix-or-champion>
+    python -m src.weight_manager.checkpoint_manager retire-task <task>
+    python -m src.weight_manager.checkpoint_manager restore <archive_manifest.json>
 """
 import argparse
 import json
@@ -47,8 +47,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from src import model_registry as registry
 from src.paths import MODEL_WEIGHTS_DIR
+from src.weight_manager import model_registry as registry
 
 # --- Fill in per task. dir: where checkpoint .zip files for this task live.
 # eval_cmd: a template list; {model_path}, {seed}, {episodes} get substituted.
@@ -143,7 +143,8 @@ def leaderboard(task: str, metric: str, minimize: bool = False) -> None:
     for i, (r, v, exists) in enumerate(scored, 1):
         prov = "known" if r.get("provenance_known") else "UNKNOWN"
         file_status = "OK" if exists else "MISSING"
-        print(f"{i:<5}{r['hash'][:12]:<14}{v:<20}{file_status:<10}{prov:<12}{r['model_path']}")
+        v_str = f"{v:.4f}" if isinstance(v, float) else str(v)
+        print(f"{i:<5}{r['hash'][:12]:<14}{v_str:<20}{file_status:<10}{prov:<12}{r['model_path']}")
     missing = sum(1 for _, _, exists in scored if not exists)
     if missing:
         print(f"\n{missing} record(s) point to files that no longer exist on disk "

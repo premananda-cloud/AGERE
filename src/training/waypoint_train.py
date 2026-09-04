@@ -73,7 +73,7 @@ from src.config import ProjectConfig, WaypointTaskConfig, waypoint_ppo_config
 from src.paths import waypoint_model_path, WAYPOINT_TB_LOG_DIR
 from src.training.gym_wrapper.waypoint_gym_wrapper import WaypointGymEnv
 from src.policies.ppo_policy import build_ppo
-from src.model_registry import record_run
+from src.weight_manager.model_registry import record_run
 
 
 def main():

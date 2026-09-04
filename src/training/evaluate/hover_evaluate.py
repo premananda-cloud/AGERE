@@ -47,7 +47,7 @@ from stable_baselines3 import PPO
 from src.config import ProjectConfig, HOVER_STAGE_PRESETS, DISTURBANCE_TYPES, DISTURBANCE_LEVELS
 from src.paths import hover_stabilize_model_path
 from src.training.gym_wrapper.hover_gym_wrapper import HoverGymEnv
-from src.model_registry import record_eval
+from src.weight_manager.model_registry import record_eval
 
 # Stage 2 criteria, per docs/hover-model-plan.md — keep these two files in
 # sync if the plan changes.
@@ -353,7 +353,7 @@ def main():
             },
         )
         print(f"Logged to model registry (hash {h[:12]}...). "
-              f"Query with: python -m src.model_registry describe {model_path}")
+              f"Query with: python -m src.weight_manager.model_registry describe {model_path}")
 
     print("\nStage 2 criteria (docs/hover-model-plan.md):")
     pos_ok = mean_pos_error < STAGE_2_MAX_POSITION_ERROR

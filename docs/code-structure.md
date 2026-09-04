@@ -36,11 +36,13 @@ entirely in `training/`, exactly where the split predicts it should.
 
 ```
 src/
-├── actions/       — action space definitions (shared across tasks)
-├── environments/  — PyBullet simulation (no Gymnasium dependency, shared)
-├── models/        — network architectures
-├── policies/      — RL algorithm construction (PPO, etc., shared)
-└── training/      — Gymnasium wrapping + the training loop
+├── actions/         — action space definitions (shared across tasks)
+├── environments/    — PyBullet simulation (no Gymnasium dependency, shared)
+├── models/          — network architectures
+├── policies/        — RL algorithm construction (PPO, etc., shared)
+├── weight_manager/  — checkpoint bookkeeping: registry, leaderboard/
+│                      promote/archive, diagnostics (shared, task-agnostic)
+└── training/        — Gymnasium wrapping + the training loop
     ├── hover_train.py        — hover training entry point, stays flat here
     ├── waypoint_train.py     — waypoint training entry point, also flat
     ├── gym_wrapper/          — the Gymnasium wrapper (one file per task)
@@ -48,6 +50,13 @@ src/
     │                           plus variants like disturbance-recovery)
     └── demo/                 — live/watchable demo scripts
 ```
+
+`weight_manager/` is a third thing, alongside the simulation/training
+split above — not "simulation" (it never touches PyBullet) and not
+"training" in the algorithm-and-task-specific sense `training/` and
+`policies/` are. It's bookkeeping *about* the artifacts training and
+evaluation produce, and it's the same bookkeeping regardless of which
+task or algorithm produced the checkpoint — see its own section below.
 
 `training/` itself is flat only for the per-task training entry points
 (`hover_train.py`, `waypoint_train.py`). Anything that comes in
@@ -110,6 +119,39 @@ compare PPO against SAC, this is the only folder that changes — the
 environment, the actions, and the training loop don't need to know or
 care which algorithm is running underneath.
 
+### `weight_manager/`
+
+Answers "which checkpoint is which, and which one is actually good" as a
+mechanical question you look up, not one you reconstruct from devlog
+prose and file mtimes — see `model_registry.py`'s module docstring for
+the 2026-08-09 incident (a mutable, overwritten checkpoint path with no
+record of what config or step-count it corresponded to) that this whole
+package exists to prevent from happening again.
+
+- `model_registry.py` — the source of truth: an append-only, SHA256-
+  content-hashed log of every training run and every eval, per
+  checkpoint file. Identifies checkpoints by hash, not filename or path,
+  so a copied or renamed file is still recognized as the same weights.
+- `checkpoint_manager.py` — operations built on top of the registry:
+  `leaderboard` (rank checkpoints by a metric), `promote` (copy the best
+  to a canonical champion path), `backfill` (eval whatever's missing a
+  record), `archive`/`retire-task` (move — never delete — files out of
+  the way once a decision's been made).
+- `check_std_window.py` — a one-off diagnostic checking a specific
+  theory-log hypothesis against TensorBoard logs (not registry-based;
+  reads `train/std` directly). Grouped here as an artifact-analysis tool
+  rather than in `training/evaluate/`, since it inspects a *training
+  run's* logs after the fact rather than scoring a policy against a
+  task's own eval criteria.
+
+This is deliberately its own top-level package, not nested inside
+`training/`: nothing here is specific to one task or one RL algorithm
+the way `training/gym_wrapper/` or `policies/` are. A checkpoint from
+any task, trained under any config, gets the same hash-identified
+tracking, ranking, and archiving treatment — so it sits alongside
+`training/`, not underneath it, the same reasoning that keeps
+`policies/` at the top level instead of inside `training/`.
+
 ### `training/`
 
 This is where the two worlds meet:
@@ -169,6 +211,13 @@ the reward function entirely?**
 - No, it depends on how we're training → it belongs in `training/`,
   `policies/`, or `models/`.
 
+A second question, for code that isn't about *producing* a trained
+policy but about *tracking* the ones already produced: **does this care
+which task or algorithm the checkpoint came from?** If it just needs a
+file's hash, its recorded metrics, and whether it's the current best —
+not what reward function or network shape trained it — it belongs in
+`weight_manager/`, not bolted onto `training/evaluate/`.
+
 ## What this buys you, concretely
 
 - You can change the reward function ten times in an afternoon without
@@ -182,3 +231,7 @@ the reward function entirely?**
   new top-level `training/waypoint_train.py` — but `environments/` needed
   no changes beyond an optional cosmetic parameter, and `actions/` needed
   none at all. This was the actual outcome, not just the design's intent.
+- `weight_manager/` answers "leaderboard this task's checkpoints" or
+  "promote the current best" the same way for hover and for waypoint_nav
+  — one `TASKS` entry per task, not a second copy of the ranking/promote/
+  archive logic living inside each task's own `evaluate/` file.

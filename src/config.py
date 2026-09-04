@@ -120,10 +120,23 @@ def magnitude_to_level(type_name: str, magnitude: float) -> int:
     training samples level uniformly and magnitude uniformly within it).
     """
     bounds = DISTURBANCE_TYPES[type_name].level_bounds
+    # Clamp explicitly at both ends. The old version fell through to
+    # `return DISTURBANCE_LEVELS` for ANY magnitude below bounds[0] --
+    # meaning a below-floor (weak) magnitude was mislabeled as the
+    # strongest level (5) instead of the weakest (1). In practice
+    # magnitude is always sampled inside some level's own bucket, so
+    # this branch is believed unreachable, but "believed unreachable"
+    # is exactly the kind of assumption this bucketing exists to not
+    # rely on for eval reporting -- so clamp correctly instead of
+    # guessing the failure direction.
+    if magnitude < bounds[0]:
+        return 1
+    if magnitude > bounds[DISTURBANCE_LEVELS]:
+        return DISTURBANCE_LEVELS
     for level in range(1, DISTURBANCE_LEVELS + 1):
         if bounds[level - 1] <= magnitude <= bounds[level]:
             return level
-    return DISTURBANCE_LEVELS  # clamp, shouldn't hit given how sampling works
+    return DISTURBANCE_LEVELS  # unreachable given the clamps above
 
 
 @dataclass

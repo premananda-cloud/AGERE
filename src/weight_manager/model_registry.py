@@ -29,8 +29,8 @@ append-only. Never edit past lines by hand; if a correction is needed, append a 
 (query helpers use the LAST record for a given hash+kind).
 
 CLI:
-    python -m src.model_registry best <task> [metric]     # e.g. best hover mean_position_error (lower/higher-is-better is metric-dependent, see best_by_metric)
-    python -m src.model_registry describe <path/to.zip>   # full history for that exact file, any task
+    python -m src.weight_manager.model_registry best <task> [metric]     # e.g. best hover mean_position_error (lower/higher-is-better is metric-dependent, see best_by_metric)
+    python -m src.weight_manager.model_registry describe <path/to.zip>   # full history for that exact file, any task
 """
 import hashlib
 import json
@@ -269,6 +269,6 @@ if __name__ == "__main__":
     else:
         print(
             "Usage:\n"
-            "  python -m src.model_registry best <task> [metric]\n"
-            "  python -m src.model_registry describe <path/to/checkpoint.zip>"
+            "  python -m src.weight_manager.model_registry best <task> [metric]\n"
+            "  python -m src.weight_manager.model_registry describe <path/to/checkpoint.zip>"
         )

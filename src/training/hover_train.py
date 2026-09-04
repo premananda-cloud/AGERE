@@ -49,7 +49,7 @@ from src.config import ProjectConfig, HOVER_STAGE_PRESETS
 from src.paths import hover_stabilize_model_path, HOVER_STABILIZE_TB_LOG_DIR, MODEL_WEIGHTS_DIR
 from src.training.gym_wrapper.hover_gym_wrapper import HoverGymEnv
 from src.policies.ppo_policy import build_ppo
-from src.model_registry import record_run
+from src.weight_manager.model_registry import record_run
 
 # Stage 1 sub-stage presets -- see config.py's HOVER_STAGE_PRESETS docstring.
 # Kept as a module-level alias here so the rest of this file (STAGE_PRESETS[...])
@@ -280,7 +280,7 @@ def main():
         disturbance=disturbance_meta,
     )
     print(f"Logged to model registry (hash {h[:12]}...). "
-          f"Query with: python -m src.model_registry describe {save_path}")
+          f"Query with: python -m src.weight_manager.model_registry describe {save_path}")
     if args.init_from:
         print(f"NOTE: cumulative_timesteps logged as this run's {config.ppo.total_timesteps} steps only, "
               f"NOT the true total including {args.init_from}'s prior training -- see record_run() call "
