@@ -189,6 +189,34 @@ class HoverTaskConfig:
     action_smoothness_weight: float = 0.01
     survival_bonus: float = 0.01
 
+    # ADDED for the angular-velocity-penalty reward-shaping EXPERIMENT
+    # (hover_angvel_experiment_train.py). Default 0.0 is a deliberate no-op
+    # -- every existing caller of HoverTaskConfig() with no explicit
+    # override (hover_train.py, hover_evaluate.py, hover_demo.py,
+    # hover_checkpoint_sweep.py, hover_tilt_diagnostic.py, the champion-
+    # selection pipeline, all of it) is byte-for-byte unaffected by this
+    # field existing. Only the new experiment script sets this nonzero.
+    #
+    # Why this exists: _obs_from_state() in hover_gym_wrapper.py never
+    # includes angular velocity (gyro rate) at all -- the policy only ever
+    # sees CURRENT roll/pitch, never how fast it's rotating. This penalty
+    # doesn't fix that (the policy still can't directly perceive its own
+    # spin rate -- observation_space is unchanged, so --init-from a
+    # champion trained without this term still loads cleanly, unlike a
+    # true observation-space change would). It only shapes the TRAINING
+    # incentive: actions that historically produced high angular velocity
+    # get penalized, same mechanism as velocity_penalty_weight above but
+    # for rotation rate instead of translation speed.
+    #
+    # Starting value (0.02) is an unvalidated guess, not a tuned number --
+    # scaled to be small relative to velocity_penalty_weight (0.05) since
+    # angular_velocity is typically larger in magnitude (rad/s) than
+    # translational velocity (m/s) for a stabilizing hover policy, so an
+    # equal weight would likely dominate the reward disproportionately.
+    # Sweep this if the first run's result is ambiguous, exactly the same
+    # discipline every other reward weight in this file has needed.
+    angular_velocity_penalty_weight: float = 0.02
+
     # --- Disturbance injection (Stage 1, added 2026-08-16) ---------------
     # Off by default -- existing hover_train.py/hover_evaluate.py runs with
     # no flags are byte-for-byte unaffected. See

@@ -201,15 +201,26 @@ class HoverGymEnv(gym.Env):
             ]
         ).astype(np.float32)
 
-    def _compute_reward(self, obs: np.ndarray, action: np.ndarray) -> float:
+    def _compute_reward(self, obs: np.ndarray, action: np.ndarray, state) -> float:
         pos_error_norm = float(np.linalg.norm(obs[0:3]))
         vel_norm = float(np.linalg.norm(obs[3:6]))
         action_delta = float(np.linalg.norm(action - self._prev_action))
+
+        # ADDED for the angular-velocity-penalty experiment. Reads
+        # state.angular_velocity directly (DroneState field, always
+        # populated) rather than obs -- angular velocity is NOT part of
+        # the 9-dim observation vector, this term only shapes the reward
+        # during training, it does not give the policy a new input.
+        # angular_velocity_penalty_weight defaults to 0.0 (see config.py),
+        # so this term is an exact no-op for every existing caller unless
+        # explicitly set.
+        angular_vel_norm = float(np.linalg.norm(state.angular_velocity))
 
         return (
             -self.task.position_error_weight * pos_error_norm
             - self.task.velocity_penalty_weight * vel_norm
             - self.task.action_smoothness_weight * action_delta
+            - self.task.angular_velocity_penalty_weight * angular_vel_norm
             + self.task.survival_bonus
         )
 
@@ -291,7 +302,7 @@ class HoverGymEnv(gym.Env):
         state = self.sim.apply_action(command)
 
         obs = self._obs_from_state(state)
-        reward = self._compute_reward(obs, action)
+        reward = self._compute_reward(obs, action, state)
 
         self._step_count += 1
 
