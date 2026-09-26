@@ -1,0 +1,26 @@
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+setuptools<82
+numpy
+scipy
+matplotlib
+PyYAML
+tqdm
+tensorboard
+
+torch
+torchvision
+torchaudio
+
+gymnasium>=1.3,<2.0
+stable-baselines3[extra]==2.9.0
+
+# Install pybullet via conda first: conda install -c conda-forge pybullet
+# Otherwise uncomment the line below and expect a source build.
+# pybullet
+
+git+https://github.com/learnsyslab/gym-pybullet-drones.git
+
+huggingface_hub
+safetensors
+wandb

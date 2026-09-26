@@ -1,0 +1,41 @@
+{
+  "rank": 10,
+  "task": "hover",
+  "model_path": "model/model_weights/checkpoints/hover_stabilize_ppo_seed0_disturbance_3x5_tiltfix3_149994_steps.zip",
+  "hash": "0e78e3ec08a9c6200ef253e1f0c666ee65494fd510893c7aa2a1ce83a4b2abde",
+  "hash_short": "0e78e3ec08a9",
+  "stage": "disturbance_3x5",
+  "seed": 0,
+  "sweep_episodes": 60,
+  "thorough_episodes": 200,
+  "ranking_metric": "kick_crash_rate",
+  "ranking_value": 0.4032258064516129,
+  "sweep_summary": {
+    "crash_rate": 0.21666666666666667,
+    "mean_pos_error": 0.10082171307876706,
+    "kick_crash_rate": 0.45,
+    "kick_n": 20,
+    "wind_crash_rate": 0.0,
+    "wind_n": 22,
+    "torque_crash_rate": 0.2222222222222222,
+    "torque_n": 18
+  },
+  "thorough_metrics": {
+    "mean_position_error": 0.09722852780716494,
+    "crash_rate": 0.225,
+    "mean_reward": -21.59685760945622,
+    "kick_crash_rate": 0.4032258064516129,
+    "kick_recovery_rate": 0.9459459459459459,
+    "kick_mean_recovery_time_steps": 5.828571428571428,
+    "kick_n_episodes": 62,
+    "torque_crash_rate": 0.30303030303030304,
+    "torque_recovery_rate": 0.9565217391304348,
+    "torque_mean_recovery_time_steps": 2.9545454545454546,
+    "torque_n_episodes": 66,
+    "wind_crash_rate": 0.0,
+    "wind_recovery_rate": 1.0,
+    "wind_mean_recovery_time_steps": 0.0,
+    "wind_n_episodes": 72
+  },
+  "run_record": null
+}
